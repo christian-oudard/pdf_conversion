@@ -80,10 +80,6 @@ def setup_document_folder(input_path: Path, documents_dir: Path) -> Path:
     folders = [
         "1_original_pdf_pages",
         "2_markdown",
-        "3_latex",
-        "4_reconstructed_pdf_pages",
-        "5_original_png",
-        "6_reconstructed_png",
     ]
 
     doc_folder.mkdir(parents=True, exist_ok=True)
@@ -137,10 +133,6 @@ def main():
     print(f"    {args.input_pdf.name}")
     print(f"    1_original_pdf_pages/ ({count} files)")
     print(f"    2_markdown/")
-    print(f"    3_latex/")
-    print(f"    4_reconstructed_pdf_pages/")
-    print(f"    5_original_png/")
-    print(f"    6_reconstructed_png/")
 
 
 if __name__ == "__main__":
