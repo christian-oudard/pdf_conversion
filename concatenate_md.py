@@ -5,11 +5,21 @@ import argparse
 import re
 from pathlib import Path
 
-DOC_DIR = Path("documents/Principles of Mathematical Analysis - W. Rudin")
+
+def find_document_dir() -> Path:
+    """Find the document directory (assumes single document in documents/)."""
+    docs = Path("documents")
+    subdirs = [d for d in docs.iterdir() if d.is_dir()]
+    if len(subdirs) == 1:
+        return subdirs[0]
+    raise ValueError(f"Expected 1 document folder, found {len(subdirs)}: {subdirs}")
 
 
-def concatenate_pages(output_path: Path | None = None):
-    md_dir = DOC_DIR / "2_markdown"
+def concatenate_pages(doc_dir: Path | None = None):
+    if doc_dir is None:
+        doc_dir = find_document_dir()
+
+    md_dir = doc_dir / "2_markdown"
 
     # Find all page files and sort numerically
     page_files = sorted(
@@ -21,9 +31,14 @@ def concatenate_pages(output_path: Path | None = None):
         print(f"No page files found in {md_dir}")
         return
 
-    # Default output path
-    if output_path is None:
-        output_path = DOC_DIR / "full_book.md"
+    # Find original PDF and use its name with .md extension
+    pdfs = list(doc_dir.glob("*.pdf"))
+    if pdfs:
+        output_name = pdfs[0].stem + ".md"
+    else:
+        output_name = doc_dir.name + ".md"
+
+    output_path = doc_dir / output_name
 
     # Concatenate
     with open(output_path, 'w') as out:
@@ -34,15 +49,14 @@ def concatenate_pages(output_path: Path | None = None):
             out.write(content)
 
     print(f"Concatenated {len(page_files)} pages into {output_path}")
-    print(f"Total lines: {sum(1 for _ in open(output_path))}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Concatenate markdown pages into single file")
-    parser.add_argument("-o", "--output", type=Path, help="Output file path")
+    parser.add_argument("doc_dir", type=Path, nargs="?", help="Document directory (auto-detected if omitted)")
     args = parser.parse_args()
 
-    concatenate_pages(args.output)
+    concatenate_pages(args.doc_dir)
 
 
 if __name__ == "__main__":

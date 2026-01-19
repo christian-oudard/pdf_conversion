@@ -18,7 +18,7 @@ Original PDF
 2_markdown/
     │
     ▼ (3) concatenate_md.py
-full_book.md
+<original>.md
 ```
 
 ## Folder Structure
@@ -28,7 +28,7 @@ documents/<book_name>/
 ├── <original>.pdf              # Original source PDF
 ├── 1_original_pdf_pages/       # Split single-page PDFs
 ├── 2_markdown/                 # Markdown with LaTeX math
-└── full_book.md                # Concatenated output
+└── <original>.md               # Concatenated output (same name as PDF)
 ```
 
 ## Step-by-Step
