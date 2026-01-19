@@ -15,9 +15,56 @@ def find_document_dir() -> Path:
     raise ValueError(f"Expected 1 document folder, found {len(subdirs)}: {subdirs}")
 
 
+def validate_pages(doc_dir: Path) -> list[str]:
+    """Validate that all PDF pages have corresponding markdown files with content.
+
+    Returns a list of error messages (empty if all valid).
+    """
+    errors = []
+    pdf_dir = doc_dir / "1_original_pdf_pages"
+    md_dir = doc_dir / "2_markdown"
+
+    # Find all PDF page files and extract their numbers
+    pdf_files = list(pdf_dir.glob("page_*.pdf"))
+    if not pdf_files:
+        errors.append("No PDF pages found in 1_original_pdf_pages/")
+        return errors
+
+    page_numbers = sorted(
+        int(re.search(r'page_(\d+)', p.name).group(1))
+        for p in pdf_files
+    )
+
+    # Check for gaps in page numbers
+    expected = list(range(page_numbers[0], page_numbers[-1] + 1))
+    missing_pages = set(expected) - set(page_numbers)
+    for page_num in sorted(missing_pages):
+        errors.append(f"Page {page_num} missing from PDF sequence")
+
+    # Check each PDF has a corresponding markdown with content
+    for pdf_file in pdf_files:
+        page_num = re.search(r'page_(\d+)', pdf_file.name).group(1)
+        md_file = md_dir / f"page_{page_num}.md"
+
+        if not md_file.exists():
+            errors.append(f"Missing markdown file: {md_file.name}")
+        elif not md_file.read_text().strip():
+            errors.append(f"Empty markdown file: {md_file.name}")
+
+    return errors
+
+
 def concatenate_pages(doc_dir: Path | None = None):
     if doc_dir is None:
         doc_dir = find_document_dir()
+
+    # Validate before concatenating
+    errors = validate_pages(doc_dir)
+    if errors:
+        print("Validation errors found:")
+        for error in errors:
+            print(f"  - {error}")
+        return
 
     md_dir = doc_dir / "2_markdown"
 
