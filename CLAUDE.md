@@ -1,55 +1,53 @@
-# PDF to Markdown Conversion Workflow
+# CLAUDE.md
 
-This project converts math-heavy PDFs to markdown with LaTeX math notation.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+```bash
+# Run all tests
+uv run python -m unittest discover -v
+
+# Run a single test file
+uv run python -m unittest test_concatenate_md -v
+
+# Run a single test
+uv run python -m unittest test_concatenate_md.TestValidatePages.test_missing_page_in_sequence -v
+```
 
 ## Environment
 
 **Always use `uv run` to execute Python scripts** in this project.
 
+**Dependencies:** pymupdf (Python), pandoc + tectonic (system, for PDF output)
+
 ## Workflow
 
 ```
-Original PDF
-    │
-    ▼ (1) split_pdf.py
-1_original_pdf_pages/
-    │
-    ▼ (2) Convert each page to markdown (Claude)
-2_markdown/
-    │
-    ▼ (3) concatenate_md.py
-<original>.md
-    │
-    ▼ (4) convert_output.py
-<original>_output.pdf, <original>_output.epub
-```
-
-## Folder Structure
-
-```
-documents/<book_name>/
-├── <original>.pdf              # Original source PDF
-├── 1_original_pdf_pages/       # Split single-page PDFs
-├── 2_markdown/                 # Markdown with LaTeX math
-├── <original>.md               # Concatenated markdown
-├── <original>_output.pdf       # Reconstructed PDF (from pandoc)
-└── <original>_output.epub      # EPUB version
+documents/<book>/
+    <original>.pdf
+    2_markdown/
+        page_001.md
+        page_002.md
+        ...
+    <original>.md         ← (2) concatenate_md.py
+    <original>_output.pdf ← (3) convert_output.py
+    <original>_output.epub
 ```
 
 ## Step-by-Step
 
-### Step 1: Split PDF
+### Step 1: Convert Each Page to Markdown
 
-```bash
-uv run python split_pdf.py <path_to_pdf>
-```
+Process in batches of 10 pages:
 
-### Step 2: Convert Each Page to Markdown
-
-For each page:
-1. Read the PDF: `Read documents/<book>/1_original_pdf_pages/page_XXX.pdf`
-2. Convert to markdown with LaTeX math
-3. Write: `Write documents/<book>/2_markdown/page_XXX.md`
+1. Render batch to PNG: `uv run python render_pages.py documents/<book> 1-10`
+2. For each PNG:
+   - Read the PNG
+   - Convert to markdown with LaTeX math
+   - Write: `Write documents/<book>/2_markdown/page_XXX.md`
+3. Delete all 10 PNGs after successful markdown creation
+4. Repeat for next batch (11-20, 21-30, etc.)
 
 **Omit print artifacts:**
 - Page numbers at top/bottom of page
@@ -70,38 +68,19 @@ These are navigation aids for print that don't belong in the markdown.
 - `\mathscr{R}` for script letters
 - `\varepsilon` not `\epsilon`
 
-### Step 3: Concatenate
+### Step 2: Concatenate
 
 ```bash
-uv run python concatenate_md.py
+uv run python concatenate_md.py documents/<book>
 ```
 
-### Step 4: Convert to PDF/EPUB
+### Step 3: Convert to PDF/EPUB
 
 ```bash
-uv run python convert_output.py
+uv run python convert_output.py documents/<book>
 ```
-
-Generates `<original>_output.pdf` and `<original>_output.epub`.
 
 Options:
 - `--format pdf` — PDF only
 - `--format epub` — EPUB only
 - (no flags) — both formats
-
-## Scripts
-
-| Script | Usage | Description |
-|--------|-------|-------------|
-| `split_pdf.py` | `uv run python split_pdf.py <pdf>` | Split PDF, create folder structure |
-| `concatenate_md.py` | `uv run python concatenate_md.py` | Combine all pages, validate completeness |
-| `convert_output.py` | `uv run python convert_output.py` | Convert markdown to PDF and EPUB |
-
-## Dependencies
-
-- **Python:** pymupdf
-- **System:** pandoc, tectonic (for PDF output)
-
-```bash
-uv sync
-```
