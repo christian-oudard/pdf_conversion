@@ -33,13 +33,19 @@ No code fences, no greetings, no explanations. Output ONLY the raw markdown cont
 """
 
 
-def convert_page(image_path: Path, output_path: Path | None = None, model: str | None = None) -> str:
+def convert_page(
+    image_path: Path,
+    output_path: Path | None = None,
+    model: str | None = None,
+    _no_fallback: bool = False,
+) -> str:
     """Convert a PNG page to markdown.
 
     Args:
         image_path: Path to the PNG file.
         output_path: Optional path to write markdown. If None, prints to stdout.
         model: Model to use (e.g., "haiku", "sonnet").
+        _no_fallback: Internal flag to prevent infinite recursion.
 
     Returns:
         The markdown content.
@@ -54,8 +60,8 @@ def convert_page(image_path: Path, output_path: Path | None = None, model: str |
         )
         markdown = response.result
     except ClaudeError as e:
-        # Fallback to combine pipeline if content filter blocks opus
-        if model == "opus" and "content filtering" in str(e):
+        # Fallback to combine pipeline if content filter blocks
+        if not _no_fallback and "content filtering" in str(e).lower():
             print("Content filter triggered, using fallback pipeline...", file=sys.stderr)
             markdown = combine_conversion(image_path)
         else:
@@ -139,10 +145,13 @@ def combine_conversion(image_path: Path, output_path: Path | None = None) -> str
     image_path = Path(image_path).resolve()
     sources = []
 
-    # Step 1: Sonnet full conversion
+    # Step 1: Sonnet full conversion (may fail)
     print("Step 1: Full conversion (sonnet)...", file=sys.stderr)
-    sonnet_full = convert_page(image_path, model="sonnet")
-    sources.append(f"UNRELIABLE FULL CONVERSION:\n{sonnet_full}")
+    try:
+        sonnet_full = convert_page(image_path, model="sonnet", _no_fallback=True)
+        sources.append(f"UNRELIABLE FULL CONVERSION:\n{sonnet_full}")
+    except ClaudeError as e:
+        print(f"  Failed: {e}", file=sys.stderr)
 
     # Step 2: Opus text-only (may fail)
     print("Step 2: Text extraction (opus)...", file=sys.stderr)

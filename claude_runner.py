@@ -84,7 +84,7 @@ def run(
         ClaudeError: If Claude exits with non-zero status, times out, or
             output cannot be parsed.
     """
-    cmd = ["claude", "-p", prompt, "--output-format", "json"]
+    cmd = ["claude", "-p", prompt, "--output-format", "json", "--no-session-persistence"]
 
     if allowed_tools:
         cmd.extend(["--allowedTools", ",".join(allowed_tools)])

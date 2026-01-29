@@ -15,7 +15,6 @@ import argparse
 import io
 import re
 import sys
-import tempfile
 from pathlib import Path
 
 import pymupdf
@@ -200,27 +199,42 @@ def concatenate_markdown(md_paths: list[Path]) -> str:
     return "\n\n".join(parts)
 
 
-def convert_markdown_to_format(md_content: str, output_path: Path, fmt: str):
-    """Convert markdown content to PDF or EPUB."""
-    # Write to temp file for pandoc
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
-        f.write(md_content)
-        temp_md = Path(f.name)
+def convert_markdown_to_format(md_path: Path, output_path: Path, fmt: str):
+    """Convert markdown file to PDF or EPUB.
 
-    try:
-        cmd = build_pandoc_command(temp_md, fmt)
-        # Override output path
+    For PDF: generates intermediate .tex file (kept).
+    For EPUB: converts directly.
+    """
+    if fmt == 'pdf':
+        # Markdown -> LaTeX -> PDF (keep .tex)
+        tex_path = output_path.with_suffix('.tex')
+
+        print(f"Converting to LaTeX...", file=sys.stderr)
+        cmd = ["pandoc", str(md_path), "-o", str(tex_path), "--standalone"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"Error converting to LaTeX:", file=sys.stderr)
+            print(result.stderr, file=sys.stderr)
+            sys.exit(1)
+
+        print(f"Converting to PDF...", file=sys.stderr)
+        cmd = ["tectonic", str(tex_path)]
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=output_path.parent)
+        if result.returncode != 0:
+            print(f"Error converting to PDF:", file=sys.stderr)
+            print(result.stderr, file=sys.stderr)
+            sys.exit(1)
+    else:
+        # EPUB: direct conversion
+        cmd = build_pandoc_command(md_path, fmt)
         cmd[3] = str(output_path)
 
         print(f"Converting to {fmt}...", file=sys.stderr)
         result = subprocess.run(cmd, capture_output=True, text=True)
-
         if result.returncode != 0:
             print(f"Error converting to {fmt}:", file=sys.stderr)
             print(result.stderr, file=sys.stderr)
             sys.exit(1)
-    finally:
-        temp_md.unlink()
 
 
 def main():
@@ -252,22 +266,46 @@ def main():
 
     args = parser.parse_args()
 
-    # Parse format and book_dir
+    # Parse format and input path
     if args.format_or_dir in ('md', 'pdf', 'epub'):
         output_format = args.format_or_dir
         if not args.book_dir:
-            parser.error("book_dir required when format is specified")
-        book_dir = args.book_dir
+            parser.error("input path required when format is specified")
+        input_path = args.book_dir
     else:
         output_format = 'md'
-        book_dir = Path(args.format_or_dir)
+        input_path = Path(args.format_or_dir)
 
-    if not book_dir.exists():
-        print(f"Error: Directory not found: {book_dir}", file=sys.stderr)
+    if not input_path.exists():
+        print(f"Error: Not found: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Find PDF
-    pdf_path = find_original_pdf(book_dir)
+    # Working directory is documents/ in this project
+    script_dir = Path(__file__).parent
+    documents_dir = script_dir / "documents"
+    documents_dir.mkdir(exist_ok=True)
+
+    # Accept either a PDF file or a directory containing one
+    if input_path.is_file() and input_path.suffix.lower() == '.pdf':
+        source_pdf = input_path
+        book_name = source_pdf.stem
+    else:
+        source_pdf = find_original_pdf(input_path)
+        book_name = input_path.name
+
+    # Set up working directory
+    work_dir = documents_dir / book_name
+    work_dir.mkdir(exist_ok=True)
+
+    # Copy PDF to working directory if not already there
+    pdf_path = work_dir / source_pdf.name
+    if not pdf_path.exists():
+        import shutil
+        print(f"Copying {source_pdf.name} to {work_dir}/")
+        shutil.copy2(source_pdf, pdf_path)
+    elif pdf_path != source_pdf.resolve():
+        print(f"Using existing {pdf_path.name}")
+
     doc = pymupdf.open(pdf_path)
     total_pages = len(doc)
     doc.close()
@@ -282,30 +320,32 @@ def main():
 
     # Determine output filename
     output_suffix = {'md': '.md', 'pdf': '_output.pdf', 'epub': '_output.epub'}[output_format]
-    output_path = book_dir / (pdf_path.stem + output_suffix)
+    output_path = work_dir / (pdf_path.stem + output_suffix)
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
+    # Step 1: Render pages to PNG
+    print("\n=== Rendering pages ===")
+    png_dir = work_dir / "png"
+    png_dir.mkdir(exist_ok=True)
+    png_paths = render_pages_to_temp(pdf_path, page_nums, png_dir, args.split)
 
-        # Step 1: Render pages to PNG
-        print("\n=== Rendering pages ===")
-        png_paths = render_pages_to_temp(pdf_path, page_nums, temp_path, args.split)
+    # Step 2: Convert PNGs to markdown
+    print("\n=== Converting to markdown ===")
+    pages_dir = work_dir / "pages"
+    pages_dir.mkdir(exist_ok=True)
+    md_paths = convert_pngs_to_markdown(png_paths, pages_dir)
 
-        # Step 2: Convert PNGs to markdown
-        print("\n=== Converting to markdown ===")
-        md_paths = convert_pngs_to_markdown(png_paths, temp_path)
+    # Step 3: Concatenate markdown
+    md_content = concatenate_markdown(md_paths)
+    md_output_path = work_dir / (pdf_path.stem + '.md')
+    md_output_path.write_text(md_content)
 
-        # Step 3: Concatenate markdown
-        print("\n=== Concatenating ===")
-        md_content = concatenate_markdown(md_paths)
-
-        # Step 4: Output
-        if output_format == 'md':
-            output_path.write_text(md_content)
-            print(f"\nOutput: {output_path}")
-        else:
-            convert_markdown_to_format(md_content, output_path, output_format)
-            print(f"\nOutput: {output_path}")
+    # Step 4: Convert to PDF/EPUB if requested
+    if output_format != 'md':
+        print("\n=== Converting ===")
+        convert_markdown_to_format(md_output_path, output_path, output_format)
+        print(f"Output: {output_path}")
+    else:
+        print(f"\nOutput: {md_output_path}")
 
 
 if __name__ == "__main__":
