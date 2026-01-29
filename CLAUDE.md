@@ -41,7 +41,7 @@ documents/<book>/
 
 Process in batches of 10 pages:
 
-1. Render batch to PNG: `uv run python render_pages.py documents/<book> 1-10`
+1. Render batch to PNG: `uv run python render_pages.py documents/<book> 1-10 --grayscale`
 2. For each PNG:
    - Read the PNG
    - Convert to markdown with LaTeX math
