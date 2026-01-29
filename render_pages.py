@@ -68,29 +68,28 @@ def process_pdf(pdf_path: Path, output_dir: Path, page_nums: list[int],
                 skip_existing: bool = False, split: bool = False) -> list[Path]:
     """Process PDF pages to PNGs, extracting or rendering as appropriate.
 
-    Returns list of output paths. Book page numbering accounts for spreads.
+    Returns list of output paths. Book page numbering is based on position
+    in the full PDF (e.g., PDF page 100 with --split → book pages 199, 200).
     """
     doc = pymupdf.open(pdf_path)
     total_pdf_pages = len(doc)
 
-    # First pass: count total book pages to determine filename width
-    book_page_count = 0
-    for pdf_page_num in page_nums:
-        if pdf_page_num < 1 or pdf_page_num > total_pdf_pages:
-            continue
-        page = doc[pdf_page_num - 1]
-        img_info = get_full_page_image(page)
-        if split and img_info:
-            book_page_count += 2
-        else:
-            book_page_count += 1
+    # Calculate filename width based on total possible book pages
+    if split:
+        max_book_page = total_pdf_pages * 2
+    else:
+        max_book_page = total_pdf_pages
+    width = max(3, len(str(max_book_page)))
 
-    width = max(3, len(str(book_page_count)))
     output_dir.mkdir(parents=True, exist_ok=True)
     output_paths = []
-    book_page = 1
 
     for pdf_page_num in page_nums:
+        # Calculate book page number based on PDF page position
+        if split:
+            book_page = (pdf_page_num - 1) * 2 + 1
+        else:
+            book_page = pdf_page_num
         if pdf_page_num < 1 or pdf_page_num > total_pdf_pages:
             print(f"Warning: Page {pdf_page_num} out of range (1-{total_pdf_pages})", file=sys.stderr)
             continue
@@ -119,14 +118,12 @@ def process_pdf(pdf_path: Path, output_dir: Path, page_nums: list[int],
                 if not skip_existing or not left_path.exists():
                     left_path.write_bytes(left_bytes)
                     output_paths.append(left_path)
-                    print(f"PDF page {pdf_page_num} (left) -> {left_path.name}")
+                    print(f"PDF page {pdf_page_num} extracted (left) -> {left_path.name}")
 
                 if not skip_existing or not right_path.exists():
                     right_path.write_bytes(right_bytes)
                     output_paths.append(right_path)
-                    print(f"PDF page {pdf_page_num} (right) -> {right_path.name}")
-
-                book_page += 2
+                    print(f"PDF page {pdf_page_num} extracted (right) -> {right_path.name}")
             else:
                 # Single page image
                 if grayscale:
@@ -137,9 +134,7 @@ def process_pdf(pdf_path: Path, output_dir: Path, page_nums: list[int],
                 if not skip_existing or not output_path.exists():
                     output_path.write_bytes(image_bytes)
                     output_paths.append(output_path)
-                    print(f"PDF page {pdf_page_num} -> {output_path.name}")
-
-                book_page += 1
+                    print(f"PDF page {pdf_page_num} extracted -> {output_path.name}")
         else:
             # Rendered page: render at DPI
             png_bytes = render_page_to_bytes(page, dpi, grayscale)
@@ -149,8 +144,6 @@ def process_pdf(pdf_path: Path, output_dir: Path, page_nums: list[int],
                 output_path.write_bytes(png_bytes)
                 output_paths.append(output_path)
                 print(f"PDF page {pdf_page_num} (rendered) -> {output_path.name}")
-
-            book_page += 1
 
     doc.close()
     return output_paths
