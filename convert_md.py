@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Convert a PNG page to markdown using Claude."""
+"""Convert a PNG page to markdown using Claude.
+
+Pipeline:
+1. Always start with marker PDF conversion
+2. Plan A: marker md + png → opus full review
+3. Plan B: marker md + png → opus (formulas) + opus (text) → combine
+4. Plan C: marker md + png → sonnet full review
+5. Plan D: marker md + png → sonnet (formulas) + sonnet (text) → combine
+6. Fallback: just use marker output
+"""
 
 import argparse
 import sys
@@ -29,165 +38,195 @@ LaTeX conventions:
 
 Ensure that formulas are transcribed correctly, with valid mathematical logic. Especially take care with variable names, superscript, and subscript.
 
+For blank pages, output only: <BLANK>
+
 No code fences, no greetings, no explanations. Output ONLY the raw markdown content.
 """
+
+# Lazy-loaded marker converter
+_marker_converter = None
+
+
+def get_marker_converter():
+    """Lazy-load marker converter (heavy import)."""
+    global _marker_converter
+    if _marker_converter is None:
+        from marker.converters.pdf import PdfConverter
+        from marker.models import create_model_dict
+        _marker_converter = PdfConverter(artifact_dict=create_model_dict())
+    return _marker_converter
+
+
+def convert_png_with_marker(png_path: Path) -> str:
+    """Convert a PNG image to markdown using marker."""
+    import io
+    import contextlib
+
+    converter = get_marker_converter()
+    with contextlib.redirect_stderr(io.StringIO()):
+        rendered = converter(str(png_path))
+    return rendered.markdown
+
+
+def _is_content_filter_error(e: ClaudeError) -> bool:
+    """Check if error is due to content filtering."""
+    return "content filtering" in str(e).lower()
+
+
+def _review_full(image_path: Path, marker_md: str, model: str) -> str:
+    """Send marker md + image to Claude for full review."""
+    prompt = f"""Here is OCR output from a scanned book page. Review it against the original image and correct any errors in the text or LaTeX formulas.
+
+OCR OUTPUT:
+{marker_md}"""
+    return run_with_image(
+        prompt,
+        image_path,
+        allowed_tools=["Read"],
+        system_prompt=SYSTEM_PROMPT,
+        model=model,
+    ).result
+
+
+def _review_text(image_path: Path, marker_md: str, model: str) -> str:
+    """Extract corrected text only (formulas as placeholders)."""
+    prompt = f"""Here is OCR output from a scanned book page. Review the TEXT only against the original image. Skip formulas - use [FORMULA] as placeholder.
+
+OCR OUTPUT:
+{marker_md}"""
+    return run_with_image(
+        prompt,
+        image_path,
+        allowed_tools=["Read"],
+        system_prompt=SYSTEM_PROMPT,
+        model=model,
+    ).result
+
+
+def _review_formulas(image_path: Path, marker_md: str, model: str) -> str:
+    """Extract corrected formulas only."""
+    prompt = f"""Here is OCR output from a scanned book page. Extract only the mathematical formulas, correcting any errors against the original image. Output each formula as LaTeX.
+
+OCR OUTPUT:
+{marker_md}"""
+    return run_with_image(
+        prompt,
+        image_path,
+        allowed_tools=["Read"],
+        system_prompt=SYSTEM_PROMPT,
+        model=model,
+    ).result
+
+
+def _combine(text: str, formulas: str, model: str) -> str:
+    """Combine text and formulas into final markdown."""
+    prompt = f"""Combine this text (with [FORMULA] placeholders) and these formulas into final markdown:
+
+TEXT:
+{text}
+
+FORMULAS:
+{formulas}"""
+    return run(
+        prompt,
+        system_prompt=SYSTEM_PROMPT,
+        model=model,
+    ).result
 
 
 def convert_page(
     image_path: Path,
     output_path: Path | None = None,
-    model: str | None = None,
-    _no_fallback: bool = False,
 ) -> str:
     """Convert a PNG page to markdown.
 
+    Pipeline:
+    1. Always start with marker PDF conversion
+    2. Plan A: marker md + png → opus full review
+    3. Plan B: marker md + png → opus (formulas) + opus (text) → combine
+    4. Plan C: marker md + png → sonnet full review
+    5. Plan D: marker md + png → sonnet (formulas) + sonnet (text) → combine
+    6. Fallback: just use marker output
+
     Args:
         image_path: Path to the PNG file.
-        output_path: Optional path to write markdown. If None, prints to stdout.
-        model: Model to use (e.g., "haiku", "sonnet").
-        _no_fallback: Internal flag to prevent infinite recursion.
+        output_path: Optional path to write markdown.
 
     Returns:
         The markdown content.
     """
+    image_path = Path(image_path).resolve()
+
+    # Step 1: Always start with marker
+    print("  marker...", file=sys.stderr, end=" ", flush=True)
+    marker_md = convert_png_with_marker(image_path)
+    print("done", file=sys.stderr)
+
+    # Try opus full review
+    print("  opus...", file=sys.stderr, end=" ", flush=True)
     try:
-        response = run_with_image(
-            "Convert this scanned book page to markdown.",
-            image_path,
-            allowed_tools=["Read"],
-            system_prompt=SYSTEM_PROMPT,
-            model=model,
-        )
-        markdown = response.result
+        markdown = _review_full(image_path, marker_md, "opus")
+        print("done", file=sys.stderr)
+        if output_path:
+            output_path.write_text(markdown)
+        return markdown
     except ClaudeError as e:
-        # Fallback to combine pipeline if content filter blocks
-        if not _no_fallback and "content filtering" in str(e).lower():
-            print("Content filter triggered, using fallback pipeline...", file=sys.stderr)
-            markdown = combine_conversion(image_path)
+        if _is_content_filter_error(e):
+            print("blocked", file=sys.stderr)
         else:
             raise
 
-    if output_path:
-        output_path.write_text(markdown)
-
-    return markdown
-
-
-def extract_text(image_path: Path, output_path: Path | None = None, model: str | None = None) -> str:
-    """Extract only text from a PNG page, skipping formulas.
-
-    Args:
-        image_path: Path to the PNG file.
-        output_path: Optional path to write text.
-        model: Model to use (e.g., "haiku", "sonnet").
-
-    Returns:
-        The extracted text as markdown.
-    """
-    response = run_with_image(
-        "Extract only the text from this page, skipping all mathematical formulas. Use [FORMULA] as a placeholder where formulas appear.",
-        image_path,
-        allowed_tools=["Read"],
-        system_prompt=SYSTEM_PROMPT,
-        model=model,
-    )
-
-    text = response.result
-
-    if output_path:
-        output_path.write_text(text)
-
-    return text
-
-
-def extract_formulas(image_path: Path, output_path: Path | None = None, model: str | None = None) -> str:
-    """Extract only mathematical formulas from a PNG page.
-
-    Args:
-        image_path: Path to the PNG file.
-        output_path: Optional path to write formulas.
-        model: Model to use (e.g., "haiku", "sonnet", "opus").
-
-    Returns:
-        The extracted formulas as LaTeX.
-    """
-    response = run_with_image(
-        "Extract only the mathematical formulas from this page. Output each formula as LaTeX, one per line.",
-        image_path,
-        allowed_tools=["Read"],
-        system_prompt=SYSTEM_PROMPT,
-        model=model,
-    )
-
-    formulas = response.result
-
-    if output_path:
-        output_path.write_text(formulas)
-
-    return formulas
-
-
-def combine_conversion(image_path: Path, output_path: Path | None = None) -> str:
-    """Convert a page using multi-model pipeline.
-
-    1. Sonnet: full conversion
-    2. Opus: text-only (optional)
-    3. Opus: formulas-only (optional)
-    4. Opus: combine whatever we have into final output
-
-    Args:
-        image_path: Path to the PNG file.
-        output_path: Optional path to write result. If None, prints to stdout.
-
-    Returns:
-        The combined markdown.
-    """
-    image_path = Path(image_path).resolve()
-    sources = []
-
-    # Step 1: Sonnet full conversion (may fail)
-    print("Step 1: Full conversion (sonnet)...", file=sys.stderr)
+    # Try opus split (text + formulas)
+    print("  opus (split)...", file=sys.stderr, end=" ", flush=True)
     try:
-        sonnet_full = convert_page(image_path, model="sonnet", _no_fallback=True)
-        sources.append(f"UNRELIABLE FULL CONVERSION:\n{sonnet_full}")
+        text = _review_text(image_path, marker_md, "opus")
+        formulas = _review_formulas(image_path, marker_md, "opus")
+        markdown = _combine(text, formulas, "opus")
+        print("done", file=sys.stderr)
+        if output_path:
+            output_path.write_text(markdown)
+        return markdown
     except ClaudeError as e:
-        print(f"  Failed: {e}", file=sys.stderr)
+        if _is_content_filter_error(e):
+            print("blocked", file=sys.stderr)
+        else:
+            raise
 
-    # Step 2: Opus text-only (may fail)
-    print("Step 2: Text extraction (opus)...", file=sys.stderr)
+    # Try sonnet full review
+    print("  sonnet...", file=sys.stderr, end=" ", flush=True)
     try:
-        opus_text = extract_text(image_path, model="opus")
-        sources.append(f"TEXT ONLY (formulas as [FORMULA]):\n{opus_text}")
+        markdown = _review_full(image_path, marker_md, "sonnet")
+        print("done", file=sys.stderr)
+        if output_path:
+            output_path.write_text(markdown)
+        return markdown
     except ClaudeError as e:
-        print(f"  Failed: {e}", file=sys.stderr)
+        if _is_content_filter_error(e):
+            print("blocked", file=sys.stderr)
+        else:
+            raise
 
-    # Step 3: Opus formulas-only (may fail)
-    print("Step 3: Formula extraction (opus)...", file=sys.stderr)
+    # Try sonnet split (text + formulas)
+    print("  sonnet (split)...", file=sys.stderr, end=" ", flush=True)
     try:
-        opus_formulas = extract_formulas(image_path, model="opus")
-        sources.append(f"FORMULAS ONLY:\n{opus_formulas}")
+        text = _review_text(image_path, marker_md, "sonnet")
+        formulas = _review_formulas(image_path, marker_md, "sonnet")
+        markdown = _combine(text, formulas, "sonnet")
+        print("done", file=sys.stderr)
+        if output_path:
+            output_path.write_text(markdown)
+        return markdown
     except ClaudeError as e:
-        print(f"  Failed: {e}", file=sys.stderr)
+        if _is_content_filter_error(e):
+            print("blocked", file=sys.stderr)
+        else:
+            raise
 
-    # Step 4: Opus combine
-    print("Step 4: Combining (opus)...", file=sys.stderr)
-    sources_text = "\n\n".join(sources)
-    combine_prompt = f"""Here are multiple conversion attempts of the same scanned book page:
-
-{sources_text}
-
-Produce the final accurate markdown. Ensure both text and mathematical formulas are correct."""
-
-    combined = run(
-        combine_prompt,
-        system_prompt=SYSTEM_PROMPT,
-        model="opus",
-    ).result
-
+    # Fallback: just use marker output
+    print("  (marker only)", file=sys.stderr)
     if output_path:
-        output_path.write_text(combined)
-
-    return combined
+        output_path.write_text(marker_md)
+    return marker_md
 
 
 def main():
@@ -200,16 +239,6 @@ def main():
         type=Path,
         help="Output markdown file (default: print to stdout)"
     )
-    parser.add_argument(
-        "-m", "--model",
-        type=str,
-        help="Model to use (e.g., haiku, sonnet)"
-    )
-    parser.add_argument(
-        "--combine",
-        action="store_true",
-        help="Force multi-model pipeline (for testing)"
-    )
 
     args = parser.parse_args()
 
@@ -218,11 +247,7 @@ def main():
         sys.exit(1)
 
     try:
-        if args.combine:
-            result = combine_conversion(args.image, args.output)
-        else:
-            result = convert_page(args.image, args.output, args.model)
-
+        result = convert_page(args.image, args.output)
         if not args.output:
             print(result)
     except ClaudeError as e:

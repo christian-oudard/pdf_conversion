@@ -95,6 +95,7 @@ def render_pages_to_temp(
     page_nums: list[int],
     temp_dir: Path,
     split: bool = False,
+    redo: bool = False,
 ) -> list[Path]:
     """Render PDF pages to PNGs in temp directory.
 
@@ -123,6 +124,22 @@ def render_pages_to_temp(
         else:
             book_page = pdf_page_num
 
+        # Check if output already exists before loading page
+        if split:
+            left_path = temp_dir / f"page_{book_page:0{width}d}.png"
+            right_path = temp_dir / f"page_{book_page + 1:0{width}d}.png"
+            if not redo and left_path.exists() and right_path.exists():
+                output_paths.extend([left_path, right_path])
+                print(f"Page {pdf_page_num} -> {left_path.name}, {right_path.name} (exists)")
+                continue
+        else:
+            output_path = temp_dir / f"page_{book_page:0{width}d}.png"
+            if not redo and output_path.exists():
+                output_paths.append(output_path)
+                print(f"Page {pdf_page_num} -> {output_path.name} (exists)")
+                continue
+
+        # Load page and extract/render
         page = doc[pdf_page_num - 1]
         img_info = get_full_page_image(page)
 
@@ -143,24 +160,18 @@ def render_pages_to_temp(
                 left_bytes, right_bytes = split_image(image_bytes)
                 left_bytes = to_grayscale(left_bytes)
                 right_bytes = to_grayscale(right_bytes)
-
-                left_path = temp_dir / f"page_{book_page:0{width}d}.png"
-                right_path = temp_dir / f"page_{book_page + 1:0{width}d}.png"
-
                 left_path.write_bytes(left_bytes)
                 right_path.write_bytes(right_bytes)
                 output_paths.extend([left_path, right_path])
                 print(f"Page {pdf_page_num} -> {left_path.name}, {right_path.name}")
             else:
                 image_bytes = to_grayscale(image_bytes)
-                output_path = temp_dir / f"page_{book_page:0{width}d}.png"
                 output_path.write_bytes(image_bytes)
                 output_paths.append(output_path)
                 print(f"Page {pdf_page_num} -> {output_path.name}")
         else:
-            # Rendered page
+            # Rendered page (no embedded image)
             png_bytes = render_page_to_bytes(page, TARGET_DPI)
-            output_path = temp_dir / f"page_{book_page:0{width}d}.png"
             output_path.write_bytes(png_bytes)
             output_paths.append(output_path)
             print(f"Page {pdf_page_num} (rendered) -> {output_path.name}")
@@ -169,13 +180,28 @@ def render_pages_to_temp(
     return output_paths
 
 
-def convert_pngs_to_markdown(png_paths: list[Path], temp_dir: Path) -> list[Path]:
-    """Convert PNG files to markdown using Claude."""
+def convert_pngs_to_markdown(png_paths: list[Path], output_dir: Path, redo: bool = False) -> list[Path]:
+    """Convert PNG files to markdown.
+
+    Args:
+        png_paths: List of PNG files to convert.
+        output_dir: Directory to write markdown files.
+        redo: If True, re-convert even if markdown exists.
+
+    Returns:
+        List of markdown file paths.
+    """
     md_paths = []
 
     for png_path in png_paths:
-        md_path = temp_dir / png_path.with_suffix('.md').name
-        print(f"Converting {png_path.name}...", file=sys.stderr)
+        md_path = output_dir / png_path.with_suffix('.md').name
+
+        if not redo and md_path.exists() and md_path.stat().st_size > 0:
+            print(f"{md_path.name} (exists)", file=sys.stderr)
+            md_paths.append(md_path)
+            continue
+
+        print(f"{md_path.name}:", file=sys.stderr)
         convert_page(png_path, md_path)
         md_paths.append(md_path)
 
@@ -193,7 +219,8 @@ def concatenate_markdown(md_paths: list[Path]) -> str:
     parts = []
     for md_path in sorted_paths:
         content = md_path.read_text().strip()
-        if content:
+        # Skip blank pages
+        if content and content != "<BLANK>":
             parts.append(content)
 
     return "\n\n".join(parts)
@@ -263,6 +290,16 @@ def main():
         action="store_true",
         help="Split each page into left/right halves (for double-page spreads)",
     )
+    parser.add_argument(
+        "--redo-png",
+        action="store_true",
+        help="Re-render PNGs even if they exist",
+    )
+    parser.add_argument(
+        "--redo-md",
+        action="store_true",
+        help="Re-convert markdown even if it exists",
+    )
 
     args = parser.parse_args()
 
@@ -326,20 +363,36 @@ def main():
     print("\n=== Rendering pages ===")
     png_dir = work_dir / "png"
     png_dir.mkdir(exist_ok=True)
-    png_paths = render_pages_to_temp(pdf_path, page_nums, png_dir, args.split)
+    png_paths = render_pages_to_temp(pdf_path, page_nums, png_dir, args.split, args.redo_png)
 
     # Step 2: Convert PNGs to markdown
     print("\n=== Converting to markdown ===")
     pages_dir = work_dir / "pages"
     pages_dir.mkdir(exist_ok=True)
-    md_paths = convert_pngs_to_markdown(png_paths, pages_dir)
+    convert_pngs_to_markdown(png_paths, pages_dir, args.redo_md)
 
-    # Step 3: Concatenate markdown
-    md_content = concatenate_markdown(md_paths)
+    # Step 3: Check if all pages are converted
+    # Count expected pages (account for split mode)
+    if args.split:
+        expected_pages = total_pages * 2
+    else:
+        expected_pages = total_pages
+
+    # Find all markdown files in pages dir
+    all_md_files = list(pages_dir.glob("page_*.md"))
+    converted_count = len([f for f in all_md_files if f.stat().st_size > 0])
+
+    if converted_count < expected_pages:
+        print(f"\nConverted {converted_count}/{expected_pages} pages", file=sys.stderr)
+        print(f"Run without --pages to finish remaining pages", file=sys.stderr)
+        sys.exit(0)
+
+    # Step 4: Concatenate markdown
+    md_content = concatenate_markdown(all_md_files)
     md_output_path = work_dir / (pdf_path.stem + '.md')
     md_output_path.write_text(md_content)
 
-    # Step 4: Convert to PDF/EPUB if requested
+    # Step 5: Convert to PDF/EPUB if requested
     if output_format != 'md':
         print("\n=== Converting ===")
         convert_markdown_to_format(md_output_path, output_path, output_format)
