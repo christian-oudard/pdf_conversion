@@ -19,68 +19,43 @@ uv run python -m unittest test_concatenate_md.TestValidatePages.test_missing_pag
 
 **Always use `uv run` to execute Python scripts** in this project.
 
-**Dependencies:** pymupdf (Python), pandoc + tectonic (system, for PDF output)
+**Dependencies:** pymupdf, pillow (Python), pandoc + tectonic (system, for PDF output)
 
-## Workflow
+## Usage
+
+```bash
+# Convert PDF to markdown (default)
+uv run python pdfconvert.py documents/<book>
+
+# Explicit format
+uv run python pdfconvert.py md documents/<book>
+uv run python pdfconvert.py pdf documents/<book>
+uv run python pdfconvert.py epub documents/<book>
+
+# Specific pages
+uv run python pdfconvert.py pdf documents/<book> --pages 1-10
+
+# Double-page spreads (splits each page in half)
+uv run python pdfconvert.py md documents/<book> --split
+```
+
+## Output
 
 ```
 documents/<book>/
-    <original>.pdf
-    2_markdown/
-        page_001.md
-        page_002.md
-        ...
-    <original>.md         ← (2) concatenate_md.py
-    <original>_output.pdf ← (3) convert_output.py
-    <original>_output.epub
+    <original>.pdf           ← input
+    <original>.md            ← markdown output
+    <original>_output.pdf    ← PDF output
+    <original>_output.epub   ← EPUB output
 ```
 
-## Step-by-Step
+Intermediate PNGs and per-page markdown are created in a temp directory and cleaned up automatically.
 
-### Step 1: Convert Each Page to Markdown
+## Internal Modules
 
-Process in batches of 10 pages:
-
-1. Render batch to PNG: `uv run python render_pages.py documents/<book> 1-10 --grayscale`
-2. For each PNG:
-   - Read the PNG
-   - Convert to markdown with LaTeX math
-   - Write: `Write documents/<book>/2_markdown/page_XXX.md`
-3. Delete all 10 PNGs after successful markdown creation
-4. Repeat for next batch (11-20, 21-30, etc.)
-
-**Omit print artifacts:**
-- Page numbers at top/bottom of page
-- Running headers/footers (book title, chapter title repeated on every page)
-- Chapter numbers repeated in headers
-
-These are navigation aids for print that don't belong in the markdown.
-
-**Markdown format:**
-- `# ` for headers
-- `**text**` for bold, `*text*` for italic
-- `$...$` for inline math
-- `$$...$$` for display math (on separate lines)
-
-**LaTeX conventions:**
-- `\|` for norm: `\|f\|_2`
-- `\bar{}` for conjugate: `\bar{\gamma}`
-- `\mathscr{R}` for script letters
-- `\varepsilon` not `\epsilon`
-
-### Step 2: Concatenate
-
-```bash
-uv run python concatenate_md.py documents/<book>
-```
-
-### Step 3: Convert to PDF/EPUB
-
-```bash
-uv run python convert_output.py documents/<book>
-```
-
-Options:
-- `--format pdf` — PDF only
-- `--format epub` — EPUB only
-- (no flags) — both formats
+- `render_png.py` — Render PDF pages to grayscale PNG (200 DPI)
+- `convert_md.py` — Convert PNG to markdown via Claude
+- `concatenate_md.py` — Merge markdown files
+- `output_format.py` — Convert markdown to PDF/EPUB via pandoc
+- `claude_runner.py` — Claude subprocess wrapper
+- `pdf_utils.py` — Shared PDF utilities

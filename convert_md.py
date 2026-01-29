@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from claude_api import run, run_with_image, ClaudeError
+from claude_runner import run, run_with_image, ClaudeError
 
 SYSTEM_PROMPT = """\
 You are a document conversion assistant. Convert scanned book pages to markdown.
