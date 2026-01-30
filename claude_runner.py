@@ -1,7 +1,7 @@
 """Simple API for invoking Claude Code as a subprocess.
 
 Example usage:
-    from claude_api import run, run_with_image
+    from claude_runner import run, run_with_image, run_with_images
 
     # Simple prompt
     response = run("Explain this code", allowed_tools=["Read"])
@@ -11,6 +11,13 @@ Example usage:
     response = run_with_image(
         "Convert this page to markdown with LaTeX math",
         "page_001.png",
+    )
+    print(response.result)
+
+    # With multiple images
+    response = run_with_images(
+        "Review these pages",
+        ["page_001.png", "page_002.png", "page_003.png"],
     )
     print(response.result)
 """
@@ -45,10 +52,16 @@ class ClaudeResponse:
     @classmethod
     def from_json(cls, data: dict) -> "ClaudeResponse":
         usage = data.get("usage", {})
+        # Include cache tokens in total input count
+        input_tokens = (
+            usage.get("input_tokens", 0)
+            + usage.get("cache_creation_input_tokens", 0)
+            + usage.get("cache_read_input_tokens", 0)
+        )
         return cls(
             result=data.get("result", ""),
             session_id=data.get("session_id", ""),
-            input_tokens=usage.get("input_tokens", 0),
+            input_tokens=input_tokens,
             output_tokens=usage.get("output_tokens", 0),
             raw=data,
         )
@@ -173,6 +186,44 @@ def run_with_image(
     """
     image_path = Path(image_path).resolve()
     full_prompt = f"Read the image at {image_path}\n\n{prompt}"
+
+    return run(
+        full_prompt,
+        allowed_tools=allowed_tools or ["Read"],
+        system_prompt=system_prompt,
+        model=model,
+        cwd=cwd,
+        timeout=timeout,
+    )
+
+
+def run_with_images(
+    prompt: str,
+    image_paths: list[Path | str],
+    *,
+    allowed_tools: list[str] | None = None,
+    system_prompt: str | None = None,
+    model: str | None = None,
+    cwd: Path | str | None = None,
+    timeout: float | None = None,
+) -> ClaudeResponse:
+    """Run Claude Code with multiple image files.
+
+    Args:
+        prompt: The prompt describing what to do with the images.
+        image_paths: List of paths to image files.
+        allowed_tools: Tools to auto-approve.
+        system_prompt: Replace the default system prompt.
+        model: Model to use.
+        cwd: Working directory.
+        timeout: Timeout in seconds.
+
+    Returns:
+        ClaudeResponse with result text and metadata.
+    """
+    resolved_paths = [Path(p).resolve() for p in image_paths]
+    paths_text = "\n".join(f"- {p}" for p in resolved_paths)
+    full_prompt = f"Read these images:\n{paths_text}\n\n{prompt}"
 
     return run(
         full_prompt,

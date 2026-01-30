@@ -21,11 +21,19 @@ import pymupdf
 from PIL import Image
 
 from pdf_utils import find_original_pdf, parse_page_range, get_full_page_image
-from convert_md import convert_page
+from convert_md import (
+    convert_pdf_with_marker,
+    split_marker_by_page,
+    review_batch,
+    remove_page_separators,
+    PAGE_SEPARATOR,
+)
+from claude_runner import ClaudeError
 from output_format import build_pandoc_command
 import subprocess
 
 TARGET_DPI = 200
+BATCH_SIZE = 100
 MAX_EXTRACT_DPI = 300
 
 
@@ -180,32 +188,45 @@ def render_pages_to_temp(
     return output_paths
 
 
-def convert_pngs_to_markdown(png_paths: list[Path], output_dir: Path, redo: bool = False) -> list[Path]:
-    """Convert PNG files to markdown.
+def convert_batch_to_markdown(
+    png_paths: list[Path],
+    marker_pages: list[str],
+    output_dir: Path,
+    batch_num: int,
+) -> str:
+    """Convert a batch of pages using Opus review.
 
     Args:
-        png_paths: List of PNG files to convert.
-        output_dir: Directory to write markdown files.
-        redo: If True, re-convert even if markdown exists.
+        png_paths: PNG files for this batch.
+        marker_pages: Marker markdown for each page.
+        output_dir: Directory to cache batch output.
+        batch_num: Batch number for naming.
 
     Returns:
-        List of markdown file paths.
+        Combined markdown for the batch.
     """
-    md_paths = []
+    batch_path = output_dir / f"batch_{batch_num:03d}.md"
 
-    for png_path in png_paths:
-        md_path = output_dir / png_path.with_suffix('.md').name
+    # Check cache
+    if batch_path.exists() and batch_path.stat().st_size > 0:
+        print(f"  batch {batch_num} ({len(png_paths)} pages) - cached")
+        return batch_path.read_text()
 
-        if not redo and md_path.exists() and md_path.stat().st_size > 0:
-            print(f"{md_path.name} (exists)", file=sys.stderr)
-            md_paths.append(md_path)
-            continue
+    print(f"  batch {batch_num} ({len(png_paths)} pages)...", end=" ", flush=True)
 
-        print(f"{md_path.name}:", file=sys.stderr)
-        convert_page(png_path, md_path)
-        md_paths.append(md_path)
-
-    return md_paths
+    try:
+        result = review_batch(png_paths, marker_pages, model="opus")
+        print("done")
+        batch_path.write_text(result)
+        return result
+    except ClaudeError as e:
+        if "content filtering" in str(e).lower():
+            print("blocked, using marker output")
+            # Fallback to marker output for this batch
+            result = "\n\n".join(marker_pages)
+            batch_path.write_text(result)
+            return result
+        raise
 
 
 def concatenate_markdown(md_paths: list[Path]) -> str:
@@ -359,36 +380,65 @@ def main():
     output_suffix = {'md': '.md', 'pdf': '_output.pdf', 'epub': '_output.epub'}[output_format]
     output_path = work_dir / (pdf_path.stem + output_suffix)
 
-    # Step 1: Render pages to PNG
+    # Step 1: Run marker on full PDF
+    print("\n=== Running marker on PDF ===")
+    marker_cache = work_dir / "marker_full.md"
+    if not args.redo_md and marker_cache.exists():
+        print("Using cached marker output")
+        marker_md = marker_cache.read_text()
+    else:
+        marker_md = convert_pdf_with_marker(pdf_path)
+        marker_cache.write_text(marker_md)
+
+    # Step 2: Render pages to PNG
     print("\n=== Rendering pages ===")
     png_dir = work_dir / "png"
     png_dir.mkdir(exist_ok=True)
     png_paths = render_pages_to_temp(pdf_path, page_nums, png_dir, args.split, args.redo_png)
 
-    # Step 2: Convert PNGs to markdown
-    print("\n=== Converting to markdown ===")
-    pages_dir = work_dir / "pages"
-    pages_dir.mkdir(exist_ok=True)
-    convert_pngs_to_markdown(png_paths, pages_dir, args.redo_md)
+    # Split marker output by page
+    marker_pages = split_marker_by_page(marker_md)
+    print(f"Split into {len(marker_pages)} pages")
 
-    # Step 3: Check if all pages are converted
-    # Count expected pages (account for split mode)
+    # Map PNG paths to marker pages (handle split mode)
     if args.split:
-        expected_pages = total_pages * 2
-    else:
-        expected_pages = total_pages
+        # In split mode, we have 2 PNGs per PDF page but marker has 1 entry per PDF page
+        # We need to duplicate marker content for left/right halves
+        expanded_marker = []
+        for mp in marker_pages:
+            expanded_marker.append(mp)  # left half
+            expanded_marker.append(mp)  # right half (same content, Claude will see the image)
+        marker_pages = expanded_marker
 
-    # Find all markdown files in pages dir
-    all_md_files = list(pages_dir.glob("page_*.md"))
-    converted_count = len([f for f in all_md_files if f.stat().st_size > 0])
+    # Ensure we have marker output for each PNG
+    if len(marker_pages) < len(png_paths):
+        print(f"Warning: marker has {len(marker_pages)} pages but {len(png_paths)} PNGs", file=sys.stderr)
+        # Pad with empty strings
+        marker_pages.extend([""] * (len(png_paths) - len(marker_pages)))
 
-    if converted_count < expected_pages:
-        print(f"\nConverted {converted_count}/{expected_pages} pages", file=sys.stderr)
-        print(f"Run without --pages to finish remaining pages", file=sys.stderr)
-        sys.exit(0)
+    # Step 3: Convert in batches
+    print(f"\n=== Converting to markdown (batch size {BATCH_SIZE}) ===")
+    batches_dir = work_dir / "batches"
+    batches_dir.mkdir(exist_ok=True)
 
-    # Step 4: Concatenate markdown
-    md_content = concatenate_markdown(all_md_files)
+    batch_outputs = []
+    for i in range(0, len(png_paths), BATCH_SIZE):
+        batch_pngs = png_paths[i:i + BATCH_SIZE]
+        batch_markers = marker_pages[i:i + BATCH_SIZE]
+        batch_num = i // BATCH_SIZE
+
+        result = convert_batch_to_markdown(batch_pngs, batch_markers, batches_dir, batch_num)
+        batch_outputs.append(result)
+
+    # Step 4: Concatenate batches and remove page separators
+    print("\n=== Concatenating output ===")
+    combined = "\n\n".join(batch_outputs)
+    # Remove page separators and blank page markers
+    md_content = remove_page_separators(combined)
+    md_content = md_content.replace("<BLANK>", "").strip()
+    # Clean up excessive newlines
+    md_content = re.sub(r"\n{3,}", "\n\n", md_content)
+
     md_output_path = work_dir / (pdf_path.stem + '.md')
     md_output_path.write_text(md_content)
 

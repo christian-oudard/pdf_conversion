@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-"""Convert a PNG page to markdown using Claude.
+"""Convert PDF pages to markdown using marker + Claude review.
 
 Pipeline:
-1. Always start with marker PDF conversion
-2. Plan A: marker md + png → opus full review
-3. Plan B: marker md + png → opus (formulas) + opus (text) → combine
-4. Plan C: marker md + png → sonnet full review
-5. Plan D: marker md + png → sonnet (formulas) + sonnet (text) → combine
-6. Fallback: just use marker output
+1. Run marker on full PDF with pagination
+2. Split marker output by page
+3. Send batches of pages to Opus for review
+4. Fallback cascade: opus → opus split → sonnet → sonnet split → marker only
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
-from claude_runner import run, run_with_image, ClaudeError
+from claude_runner import run, run_with_image, run_with_images, ClaudeError
 
 SYSTEM_PROMPT = """\
 You are a document conversion assistant. Convert scanned book pages to markdown.
@@ -46,15 +45,61 @@ No code fences, no greetings, no explanations. Output ONLY the raw markdown cont
 # Lazy-loaded marker converter
 _marker_converter = None
 
+# Page separator pattern used by marker
+PAGE_SEPARATOR = "-" * 48
+PAGE_MARKER_PATTERN = re.compile(r"\{(\d+)\}" + re.escape(PAGE_SEPARATOR))
+
 
 def get_marker_converter():
-    """Lazy-load marker converter (heavy import)."""
+    """Lazy-load marker converter with pagination enabled."""
     global _marker_converter
     if _marker_converter is None:
         from marker.converters.pdf import PdfConverter
         from marker.models import create_model_dict
+
         _marker_converter = PdfConverter(artifact_dict=create_model_dict())
+        # Enable pagination (converter.renderer is a class, not instance)
+        _marker_converter.renderer.paginate_output = True
     return _marker_converter
+
+
+def convert_pdf_with_marker(pdf_path: Path) -> str:
+    """Convert a PDF to markdown using marker with pagination."""
+    converter = get_marker_converter()
+    rendered = converter(str(pdf_path))
+    return rendered.markdown
+
+
+def split_marker_by_page(marker_md: str) -> list[str]:
+    """Split paginated marker output into per-page chunks.
+
+    Returns list of markdown strings, one per page (0-indexed).
+    Page separators (---...) are kept at the end of each page.
+    """
+    # Find all page markers and their positions
+    matches = list(PAGE_MARKER_PATTERN.finditer(marker_md))
+    if not matches:
+        return [marker_md.strip()]
+
+    pages = []
+    for i, match in enumerate(matches):
+        page_id = int(match.group(1))
+        start = match.end()
+        # End is either next marker or end of string
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(marker_md)
+        content = marker_md[start:end].strip()
+
+        # Ensure pages list is long enough
+        while len(pages) <= page_id:
+            pages.append("")
+        pages[page_id] = content
+
+    return pages
+
+
+def remove_page_separators(markdown: str) -> str:
+    """Remove page separators from final output."""
+    return markdown.replace(PAGE_SEPARATOR, "").strip()
 
 
 def convert_png_with_marker(png_path: Path) -> str:
@@ -65,7 +110,8 @@ def convert_png_with_marker(png_path: Path) -> str:
     converter = get_marker_converter()
     with contextlib.redirect_stderr(io.StringIO()):
         rendered = converter(str(png_path))
-    return rendered.markdown
+    # Strip any page markers from single-page output
+    return PAGE_MARKER_PATTERN.sub("", rendered.markdown).strip()
 
 
 def _is_content_filter_error(e: ClaudeError) -> bool:
@@ -82,6 +128,37 @@ OCR OUTPUT:
     return run_with_image(
         prompt,
         image_path,
+        allowed_tools=["Read"],
+        system_prompt=SYSTEM_PROMPT,
+        model=model,
+    ).result
+
+
+def review_batch(
+    image_paths: list[Path],
+    marker_mds: list[str],
+    model: str = "opus",
+) -> str:
+    """Send a batch of pages to Claude for review.
+
+    Args:
+        image_paths: List of PNG files for the batch.
+        marker_mds: List of marker markdown for each page.
+        model: Model to use for review.
+
+    Returns:
+        Combined markdown for all pages in the batch.
+    """
+    combined_md = "\n\n".join(marker_mds)
+    prompt = f"""Here is OCR output from {len(marker_mds)} consecutive scanned book pages.
+Review against the original images and correct any errors in the text or LaTeX formulas.
+
+OCR OUTPUT:
+{combined_md}"""
+
+    return run_with_images(
+        prompt,
+        image_paths,
         allowed_tools=["Read"],
         system_prompt=SYSTEM_PROMPT,
         model=model,
