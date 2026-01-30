@@ -12,6 +12,27 @@ Usage:
 
 import modal
 
+# Modal GPU pricing (USD/hour) - https://modal.com/pricing
+GPU_PRICES = {
+    "T4": 0.59,
+    "L4": 0.80,
+    "A10G": 1.10,
+    "A100-40GB": 3.00,
+    "A100-80GB": 4.58,
+    "H100": 5.49,
+}
+
+# Configuration (importable by pdfconvert.py)
+GPU = "A10G"
+
+# Batch sizes - surya recommended defaults (from README)
+RECOGNITION_BATCH_SIZE = 512   # 40MB/item, ~20GB VRAM
+LAYOUT_BATCH_SIZE = 32         # 220MB/item, ~7GB VRAM
+DETECTION_BATCH_SIZE = 36      # 440MB/item, ~16GB VRAM
+OCR_ERROR_BATCH_SIZE = 32      # Similar to layout
+EQUATION_BATCH_SIZE = 512      # Same as recognition
+TABLE_REC_BATCH_SIZE = 64      # 150MB/item, ~10GB VRAM
+
 app = modal.App("marker-pdf")
 
 
@@ -37,7 +58,7 @@ marker_image = (
 
 @app.cls(
     image=marker_image,
-    gpu="A100-40GB",
+    gpu=GPU,
     timeout=3600,  # 1 hour
     scaledown_window=120,  # Keep warm for 2 min
 )
@@ -53,8 +74,16 @@ class MarkerConverter:
         config = {
             "output_format": "markdown",
             "force_ocr": True,  # Always OCR, skip text extraction
-            "batch_multiplier": 64,  # Use more VRAM for speed (A100-40GB has 40GB)
+            "extract_images": False,  # We do our own PNG rendering
+            # Batch sizes for different model stages (marker 1.10.1+)
+            "recognition_batch_size": RECOGNITION_BATCH_SIZE,
+            "layout_batch_size": LAYOUT_BATCH_SIZE,
+            "detection_batch_size": DETECTION_BATCH_SIZE,
+            "ocr_error_batch_size": OCR_ERROR_BATCH_SIZE,
+            "equation_batch_size": EQUATION_BATCH_SIZE,
+            "table_rec_batch_size": TABLE_REC_BATCH_SIZE,
         }
+        print(f"Config: rec={RECOGNITION_BATCH_SIZE}, layout={LAYOUT_BATCH_SIZE}, det={DETECTION_BATCH_SIZE}, ocr_err={OCR_ERROR_BATCH_SIZE}, eq={EQUATION_BATCH_SIZE}, table={TABLE_REC_BATCH_SIZE}")
         config_parser = ConfigParser(config)
 
         self.converter = PdfConverter(
@@ -70,7 +99,24 @@ class MarkerConverter:
     def convert(self, pdf_bytes: bytes) -> str:
         """Convert PDF bytes to paginated markdown."""
         import tempfile
+        import threading
+        import time
         from pathlib import Path
+
+        import torch
+
+        # Track peak VRAM usage
+        peak_vram = [0.0]
+        stop_monitor = threading.Event()
+
+        def monitor_gpu():
+            while not stop_monitor.is_set():
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                peak_vram[0] = max(peak_vram[0], allocated)
+                time.sleep(1)
+
+        monitor_thread = threading.Thread(target=monitor_gpu, daemon=True)
+        monitor_thread.start()
 
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
             f.write(pdf_bytes)
@@ -78,6 +124,8 @@ class MarkerConverter:
 
         try:
             rendered = self.converter(str(pdf_path))
+            stop_monitor.set()
+            print(f"Peak VRAM: {peak_vram[0]:.1f} GB")
             return rendered.markdown
         finally:
             pdf_path.unlink()

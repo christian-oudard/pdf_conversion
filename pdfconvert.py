@@ -35,15 +35,19 @@ from output_format import build_pandoc_command
 import subprocess
 
 TARGET_DPI = 200
-BATCH_SIZE = 8  # ~25K tokens/page at 200 DPI, fits in 200K context
+BATCH_SIZE = 10
 MAX_EXTRACT_DPI = 300
 
 
 def convert_pdf_with_modal(pdf_path: Path) -> str:
     """Convert PDF to markdown using marker on Modal (cloud GPU)."""
     import modal
+    from modal_marker import (
+        GPU, GPU_PRICES,
+        RECOGNITION_BATCH_SIZE, LAYOUT_BATCH_SIZE, DETECTION_BATCH_SIZE,
+        OCR_ERROR_BATCH_SIZE, EQUATION_BATCH_SIZE, TABLE_REC_BATCH_SIZE,
+    )
 
-    print(f"Uploading {pdf_path.stat().st_size / 1024 / 1024:.1f} MB to Modal...")
     pdf_bytes = pdf_path.read_bytes()
 
     # Call the deployed class method
@@ -54,12 +58,14 @@ def convert_pdf_with_modal(pdf_path: Path) -> str:
         print("  modal deploy modal_marker.py", file=sys.stderr)
         sys.exit(1)
 
-    print("Running marker OCR on Modal...", flush=True)
+    batch_info = f"rec={RECOGNITION_BATCH_SIZE}, layout={LAYOUT_BATCH_SIZE}, det={DETECTION_BATCH_SIZE}, ocr_err={OCR_ERROR_BATCH_SIZE}, eq={EQUATION_BATCH_SIZE}, table={TABLE_REC_BATCH_SIZE}"
+    print(f"Running marker OCR on Modal ({GPU}, {batch_info})...", flush=True)
     start = time.time()
     converter = MarkerConverter()
     result = converter.convert.remote(pdf_bytes)
     elapsed = time.time() - start
-    print(f"Done in {elapsed:.1f}s")
+    cost = (elapsed / 3600) * GPU_PRICES.get(GPU, 0)
+    print(f"Done in {elapsed:.1f}s (~${cost:.2f})")
     return result
 
 
@@ -147,6 +153,17 @@ def render_pages_to_temp(
 
     output_paths = []
 
+    # Track ranges for collapsed output
+    def flush_range(status: str, start: int, end: int):
+        if start == end:
+            print(f"Page {start} ({status})")
+        else:
+            print(f"Pages {start}-{end} ({status})")
+
+    current_status: str | None = None
+    range_start = 0
+    range_end = 0
+
     for pdf_page_num in page_nums:
         if pdf_page_num < 1 or pdf_page_num > total_pdf_pages:
             print(f"Warning: Page {pdf_page_num} out of range (1-{total_pdf_pages})", file=sys.stderr)
@@ -158,19 +175,37 @@ def render_pages_to_temp(
         else:
             book_page = pdf_page_num
 
-        # Check if output already exists before loading page
+        # Determine paths
         if split:
             left_path = temp_dir / f"page_{book_page:0{width}d}.png"
             right_path = temp_dir / f"page_{book_page + 1:0{width}d}.png"
-            if not redo and left_path.exists() and right_path.exists():
-                output_paths.extend([left_path, right_path])
-                print(f"Page {pdf_page_num} -> {left_path.name}, {right_path.name} (exists)")
-                continue
         else:
             output_path = temp_dir / f"page_{book_page:0{width}d}.png"
+
+        # Check if output already exists before loading page
+        if split:
+            if not redo and left_path.exists() and right_path.exists():
+                output_paths.extend([left_path, right_path])
+                status = "exists"
+                if current_status == status:
+                    range_end = pdf_page_num
+                else:
+                    if current_status:
+                        flush_range(current_status, range_start, range_end)
+                    current_status = status
+                    range_start = range_end = pdf_page_num
+                continue
+        else:
             if not redo and output_path.exists():
                 output_paths.append(output_path)
-                print(f"Page {pdf_page_num} -> {output_path.name} (exists)")
+                status = "exists"
+                if current_status == status:
+                    range_end = pdf_page_num
+                else:
+                    if current_status:
+                        flush_range(current_status, range_start, range_end)
+                    current_status = status
+                    range_start = range_end = pdf_page_num
                 continue
 
         # Load page and extract/render
@@ -197,12 +232,11 @@ def render_pages_to_temp(
                 left_path.write_bytes(left_bytes)
                 right_path.write_bytes(right_bytes)
                 output_paths.extend([left_path, right_path])
-                print(f"Page {pdf_page_num} -> {left_path.name}, {right_path.name}")
             else:
                 image_bytes = to_grayscale(image_bytes)
                 output_path.write_bytes(image_bytes)
                 output_paths.append(output_path)
-                print(f"Page {pdf_page_num} -> {output_path.name}")
+            status = "extracted"
         else:
             # Rendered page (no embedded image)
             png_bytes = render_page_to_bytes(page, TARGET_DPI)
@@ -211,11 +245,23 @@ def render_pages_to_temp(
                 left_path.write_bytes(left_bytes)
                 right_path.write_bytes(right_bytes)
                 output_paths.extend([left_path, right_path])
-                print(f"Page {pdf_page_num} (rendered) -> {left_path.name}, {right_path.name}")
             else:
                 output_path.write_bytes(png_bytes)
                 output_paths.append(output_path)
-                print(f"Page {pdf_page_num} (rendered) -> {output_path.name}")
+            status = "rendered"
+
+        # Update range tracking
+        if current_status == status:
+            range_end = pdf_page_num
+        else:
+            if current_status:
+                flush_range(current_status, range_start, range_end)
+            current_status = status
+            range_start = range_end = pdf_page_num
+
+    # Flush final range
+    if current_status:
+        flush_range(current_status, range_start, range_end)
 
     doc.close()
     return output_paths
@@ -225,7 +271,8 @@ def convert_batch_to_markdown(
     png_paths: list[Path],
     marker_pages: list[str],
     output_dir: Path,
-    batch_num: int,
+    start_page: int,
+    end_page: int,
     redo: bool = False,
 ) -> str:
     """Convert a batch of pages using Opus review.
@@ -234,21 +281,20 @@ def convert_batch_to_markdown(
         png_paths: PNG files for this batch.
         marker_pages: Marker markdown for each page.
         output_dir: Directory to cache batch output.
-        batch_num: Batch number for naming.
+        start_page: First page number (1-indexed).
+        end_page: Last page number (1-indexed).
         redo: Force re-run even if cached.
 
     Returns:
         Combined markdown for the batch.
     """
-    batch_path = output_dir / f"batch_{batch_num:03d}.md"
+    batch_path = output_dir / f"pages_{start_page:03d}-{end_page:03d}.md"
 
     # Check cache
     if not redo and batch_path.exists() and batch_path.stat().st_size > 0:
-        print(f"  pages {batch_num * len(png_paths) + 1}-{batch_num * len(png_paths) + len(png_paths)} (cached)")
+        print(f"  pages {start_page}-{end_page} (cached)")
         return batch_path.read_text()
 
-    start_page = batch_num * len(png_paths) + 1
-    end_page = start_page + len(png_paths) - 1
     print(f"  pages {start_page}-{end_page}...", end=" ", flush=True)
 
     try:
@@ -423,7 +469,8 @@ def main():
     else:
         page_nums = list(range(1, total_pages + 1))
 
-    print(f"Processing {pdf_path.name} ({len(page_nums)} pages)")
+    file_size_mb = pdf_path.stat().st_size / 1024 / 1024
+    print(f"Processing {pdf_path.name} ({len(page_nums)} pages, {file_size_mb:.1f} MB)")
 
     # Determine output filename
     output_suffix = {'md': '.md', 'pdf': '_output.pdf', 'epub': '_output.epub'}[output_format]
@@ -470,17 +517,52 @@ def main():
 
     # Step 3: Review with Claude (correct OCR errors)
     print(f"\n=== Reviewing with Claude ({BATCH_SIZE} pages/batch) ===")
-    batches_dir = work_dir / "batches"
-    batches_dir.mkdir(exist_ok=True)
+    pages_dir = work_dir / "pages"
+    pages_dir.mkdir(exist_ok=True)
 
+    # Scan existing cached page files to find which pages are done
+    cached_ranges = []  # list of (start, end, path)
+    for f in sorted(pages_dir.glob("pages_*.md")):
+        # Parse pages_001-008.md -> (1, 8)
+        match = re.match(r"pages_(\d+)-(\d+)\.md", f.name)
+        if match and f.stat().st_size > 0:
+            cached_ranges.append((int(match.group(1)), int(match.group(2)), f))
+
+    # Build set of covered pages
+    covered_pages = set()
+    for start, end, _ in cached_ranges:
+        covered_pages.update(range(start, end + 1))
+
+    # Process all pages, using cache where available
     batch_outputs = []
-    for i in range(0, len(png_paths), BATCH_SIZE):
-        batch_pngs = png_paths[i:i + BATCH_SIZE]
-        batch_markers = marker_pages[i:i + BATCH_SIZE]
-        batch_num = i // BATCH_SIZE
+    total_pages = len(png_paths)
+    i = 0
+    while i < total_pages:
+        page_num = i + 1  # 1-indexed
 
-        result = convert_batch_to_markdown(batch_pngs, batch_markers, batches_dir, batch_num, args.redo_claude)
-        batch_outputs.append(result)
+        # Check if this page is in a cached range
+        cached_hit = None
+        for start, end, path in cached_ranges:
+            if start == page_num:
+                cached_hit = (start, end, path)
+                break
+
+        if cached_hit and not args.redo_claude:
+            start, end, path = cached_hit
+            print(f"  pages {start}-{end} (cached)")
+            batch_outputs.append(path.read_text())
+            i = end  # Skip to end of cached range
+        else:
+            # Process new batch
+            end_idx = min(i + BATCH_SIZE, total_pages)
+            batch_pngs = png_paths[i:end_idx]
+            batch_markers = marker_pages[i:end_idx]
+            start_page = i + 1
+            end_page = end_idx
+
+            result = convert_batch_to_markdown(batch_pngs, batch_markers, pages_dir, start_page, end_page, args.redo_claude)
+            batch_outputs.append(result)
+            i = end_idx
 
     # Step 4: Concatenate batches and remove page separators
     print("\n=== Concatenating output ===")
