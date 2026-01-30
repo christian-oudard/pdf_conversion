@@ -15,6 +15,13 @@ from pathlib import Path
 
 from claude_runner import run, run_with_image, run_with_images, ClaudeError
 
+
+def extract_output(text: str) -> str:
+    """Extract content from <output> tags, or return original if no tags."""
+    match = re.search(r'<output>(.*?)</output>', text, re.DOTALL)
+    return match.group(1).strip() if match else text.strip()
+
+
 # Load system prompt from file
 _PROMPT_FILE = Path(__file__).parent / "prompts" / "review_ocr.txt"
 SYSTEM_PROMPT = _PROMPT_FILE.read_text()
@@ -102,13 +109,13 @@ def _review_full(image_path: Path, marker_md: str, model: str) -> str:
 
 OCR OUTPUT:
 {marker_md}"""
-    return run_with_image(
+    return extract_output(run_with_image(
         prompt,
         image_path,
         allowed_tools=["Read"],
         system_prompt=SYSTEM_PROMPT,
         model=model,
-    ).result
+    ).result)
 
 
 def review_batch(
@@ -155,12 +162,12 @@ Compare the OCR text against the original images and fix errors:
 Output the CORRECTED markdown - not a summary of changes."""
 
     try:
-        return run(
+        return extract_output(run(
             prompt,
             allowed_tools=["Read"],
             system_prompt=SYSTEM_PROMPT,
             model=model,
-        ).result
+        ).result)
     finally:
         # Clean up temp files
         ocr_file.unlink(missing_ok=True)
@@ -173,13 +180,13 @@ def _review_text(image_path: Path, marker_md: str, model: str) -> str:
 
 OCR OUTPUT:
 {marker_md}"""
-    return run_with_image(
+    return extract_output(run_with_image(
         prompt,
         image_path,
         allowed_tools=["Read"],
         system_prompt=SYSTEM_PROMPT,
         model=model,
-    ).result
+    ).result)
 
 
 def _review_formulas(image_path: Path, marker_md: str, model: str) -> str:
@@ -188,13 +195,13 @@ def _review_formulas(image_path: Path, marker_md: str, model: str) -> str:
 
 OCR OUTPUT:
 {marker_md}"""
-    return run_with_image(
+    return extract_output(run_with_image(
         prompt,
         image_path,
         allowed_tools=["Read"],
         system_prompt=SYSTEM_PROMPT,
         model=model,
-    ).result
+    ).result)
 
 
 def _combine(text: str, formulas: str, model: str) -> str:
@@ -206,11 +213,11 @@ TEXT:
 
 FORMULAS:
 {formulas}"""
-    return run(
+    return extract_output(run(
         prompt,
         system_prompt=SYSTEM_PROMPT,
         model=model,
-    ).result
+    ).result)
 
 
 def convert_page(

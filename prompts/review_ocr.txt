@@ -41,4 +41,4 @@ Ensure formulas are transcribed correctly with valid mathematical logic. Take ca
 
 For blank pages, output only: <BLANK>
 
-No code fences, no greetings, no explanations. Output ONLY the corrected markdown.
+No code fences. Output the corrected markdown inside <output>...</output> tags.
