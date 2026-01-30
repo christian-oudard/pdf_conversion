@@ -25,14 +25,13 @@ GPU_PRICES = {
 # Configuration (importable by pdfconvert.py)
 GPU = "A10G"
 
-# Batch sizes - conservative for large docs on A10G (24GB VRAM)
-# Reduced from surya defaults to leave headroom for model weights + large docs
-RECOGNITION_BATCH_SIZE = 128   # 40MB/item, ~5GB VRAM (was 512)
-LAYOUT_BATCH_SIZE = 16         # 220MB/item, ~3.5GB VRAM (was 32)
-DETECTION_BATCH_SIZE = 18      # 440MB/item, ~8GB VRAM (was 36)
-OCR_ERROR_BATCH_SIZE = 16      # Similar to layout (was 32)
-EQUATION_BATCH_SIZE = 128      # Same as recognition (was 512)
-TABLE_REC_BATCH_SIZE = 32      # 150MB/item, ~5GB VRAM (was 64)
+# Batch sizes - surya recommended defaults (from README)
+RECOGNITION_BATCH_SIZE = 512   # 40MB/item, ~20GB VRAM
+LAYOUT_BATCH_SIZE = 32         # 220MB/item, ~7GB VRAM
+DETECTION_BATCH_SIZE = 36      # 440MB/item, ~16GB VRAM
+OCR_ERROR_BATCH_SIZE = 32      # Similar to layout
+EQUATION_BATCH_SIZE = 512      # Same as recognition
+TABLE_REC_BATCH_SIZE = 64      # 150MB/item, ~10GB VRAM
 
 app = modal.App("marker-pdf")
 

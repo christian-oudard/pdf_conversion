@@ -18,7 +18,7 @@ import io
 import re
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 
 import pymupdf
@@ -598,16 +598,28 @@ def main():
             return idx, result
 
         if args.jobs > 1:
-            # Parallel execution in chunks, showing progress
+            # Sliding window: always keep args.jobs running, start new one as each completes
             with ThreadPoolExecutor(max_workers=args.jobs) as executor:
-                for chunk_start in range(0, len(uncached_batches), args.jobs):
-                    chunk = uncached_batches[chunk_start:chunk_start + args.jobs]
-                    page_ranges = [f"{s}-{e}" for _, s, e in chunk]
-                    print(f"  starting: {', '.join(page_ranges)}")
-                    futures = {executor.submit(process_batch, b): b for b in chunk}
-                    for future in as_completed(futures):
+                pending = set()
+                batch_iter = iter(uncached_batches)
+
+                # Start initial batch of jobs
+                for batch_info in batch_iter:
+                    pending.add(executor.submit(process_batch, batch_info))
+                    if len(pending) >= args.jobs:
+                        break
+
+                # As each completes, start next one
+                while pending:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in done:
                         idx, result = future.result()
                         batch_results[idx] = result
+                    # Start new jobs to replace completed ones
+                    for batch_info in batch_iter:
+                        pending.add(executor.submit(process_batch, batch_info))
+                        if len(pending) >= args.jobs:
+                            break
         else:
             # Sequential execution
             for batch_info in uncached_batches:
