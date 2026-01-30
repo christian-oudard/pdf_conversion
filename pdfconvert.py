@@ -163,11 +163,13 @@ def render_pages_to_temp(
     output_paths = []
 
     # Track ranges for collapsed output
+    label = "Double-page" if split else "Page"
+    labels = "Double-pages" if split else "Pages"
     def flush_range(status: str, start: int, end: int):
         if start == end:
-            print(f"Page {start} ({status})")
+            print(f"{label} {start} ({status})")
         else:
-            print(f"Pages {start}-{end} ({status})")
+            print(f"{labels} {start}-{end} ({status})")
 
     current_status: str | None = None
     range_start = 0
@@ -481,7 +483,10 @@ def main():
         marker_cache.write_text(marker_md)
 
     # Step 2: Render pages to PNG
-    print("\n=== Rendering pages ===")
+    if args.split:
+        print(f"\n=== Rendering pages (split: {len(page_nums)} double-pages → {len(page_nums) * 2} pages) ===")
+    else:
+        print("\n=== Rendering pages ===")
     png_dir = work_dir / "png"
     png_dir.mkdir(exist_ok=True)
 
@@ -501,7 +506,6 @@ def main():
 
     # Split marker output by page
     marker_pages = split_marker_by_page(marker_md)
-    print(f"Split marker into {len(marker_pages)} pages")
 
     # Validate marker page count matches PDF
     if len(marker_pages) != len(page_nums):
@@ -527,7 +531,7 @@ def main():
     # In split mode, round up to even number (complete L/R pairs)
     batch_size = BATCH_SIZE + (BATCH_SIZE % 2) if args.split else BATCH_SIZE
     parallel_info = f", {args.jobs} parallel" if args.jobs > 1 else ""
-    spread_info = f" = {batch_size // 2} spreads" if args.split else ""
+    spread_info = f" = {batch_size // 2} double-pages" if args.split else ""
     print(f"\n=== Reviewing with Claude ({batch_size} pages/batch{spread_info}{parallel_info}) ===")
     pages_dir = work_dir / "pages"
     pages_dir.mkdir(exist_ok=True)
@@ -594,14 +598,16 @@ def main():
             return idx, result
 
         if args.jobs > 1:
-            # Parallel execution - show what we're starting
-            page_ranges = [f"{s}-{e}" for _, s, e in uncached_batches]
-            print(f"  starting {len(uncached_batches)} batches: {', '.join(page_ranges)}")
+            # Parallel execution in chunks, showing progress
             with ThreadPoolExecutor(max_workers=args.jobs) as executor:
-                futures = {executor.submit(process_batch, b): b for b in uncached_batches}
-                for future in as_completed(futures):
-                    idx, result = future.result()
-                    batch_results[idx] = result
+                for chunk_start in range(0, len(uncached_batches), args.jobs):
+                    chunk = uncached_batches[chunk_start:chunk_start + args.jobs]
+                    page_ranges = [f"{s}-{e}" for _, s, e in chunk]
+                    print(f"  starting: {', '.join(page_ranges)}")
+                    futures = {executor.submit(process_batch, b): b for b in chunk}
+                    for future in as_completed(futures):
+                        idx, result = future.result()
+                        batch_results[idx] = result
         else:
             # Sequential execution
             for batch_info in uncached_batches:
