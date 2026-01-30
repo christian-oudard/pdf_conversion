@@ -16,7 +16,7 @@ from pathlib import Path
 from claude_runner import run, run_with_image, run_with_images, ClaudeError
 
 SYSTEM_PROMPT = """\
-You are a document conversion assistant. Convert scanned book pages to markdown.
+You are a document conversion assistant. Review OCR output and correct errors.
 
 Omit print artifacts:
 - Page numbers at top/bottom of page
@@ -25,21 +25,41 @@ Omit print artifacts:
 
 Markdown format:
 - # for headers
-- **text** for bold, *text* for italic
+- **text** for bold (no spaces inside delimiters)
+- *text* for italic (no spaces inside delimiters)
 - $...$ for inline math
-- $$...$$ for display math (on separate lines)
+- $$...$$ for display math (must be on its own line, not inline with text)
 
-LaTeX conventions:
-- \\| for norm: \\|f\\|_2
-- \\bar{} for conjugate: \\bar{\\gamma}
-- \\mathscr{R} for script letters
-- \\varepsilon not \\epsilon
+CRITICAL - Inline math (OCR often misses these):
+- ADD $...$ around ALL mathematical variables, even single letters in prose
+- Variables like x, y, z, t, s, n, k, f, g, T, etc. in math context need $...$
+- Correct: "the process $z$ is killed" / "for all $T > t$" / "at time $s$"
+- Wrong: "the process z is killed" / "for all T > t" / "at time s"
+- Also wrap expressions: "$t \\leq s$" not "t ≤ s", "$k = 1, 2, \\ldots$" not "k = 1, 2, ..."
 
-Ensure that formulas are transcribed correctly, with valid mathematical logic. Especially take care with variable names, superscript, and subscript.
+LaTeX symbol conventions:
+| Symbol | Wrong | Correct |
+|--------|-------|---------|
+| ‖f‖ | \\|\\|f\\|\\| or \|\|f\|\| | \\|f\\| |
+| ε | \\epsilon | \\varepsilon |
+| ℛ | R | \\mathscr{R} |
+| γ̄ | \\gamma | \\bar{\\gamma} |
+| → | -> | \\to or \\rightarrow |
+| ≤ | <= | \\leq or \\le |
+| ∈ | in | \\in |
+| ∞ | infinity | \\infty |
+
+Preserve structure:
+- Keep paragraph breaks as in original
+- Keep address blocks and multi-line formatting
+- Do not reorder content (footnotes stay where they appear)
+- Use \\qquad for equation number spacing: (82) \\qquad f(x) = ...
+
+Ensure formulas are transcribed correctly with valid mathematical logic. Take care with variable names, superscript, and subscript.
 
 For blank pages, output only: <BLANK>
 
-No code fences, no greetings, no explanations. Output ONLY the raw markdown content.
+No code fences, no greetings, no explanations. Output ONLY the corrected markdown.
 """
 
 # Lazy-loaded marker converter
@@ -138,6 +158,7 @@ def review_batch(
     image_paths: list[Path],
     marker_mds: list[str],
     model: str = "opus",
+    work_dir: Path | None = None,
 ) -> str:
     """Send a batch of pages to Claude for review.
 
@@ -145,20 +166,35 @@ def review_batch(
         image_paths: List of PNG files for the batch.
         marker_mds: List of marker markdown for each page.
         model: Model to use for review.
+        work_dir: Directory for temp files (uses image_paths[0].parent if None).
 
     Returns:
         Combined markdown for all pages in the batch.
     """
+    # Write OCR output and image list to files to avoid command line length limits
     combined_md = "\n\n".join(marker_mds)
-    prompt = f"""Here is OCR output from {len(marker_mds)} consecutive scanned book pages.
-Review against the original images and correct any errors in the text or LaTeX formulas.
+    if work_dir is None:
+        work_dir = image_paths[0].parent if image_paths else Path.cwd()
 
-OCR OUTPUT:
-{combined_md}"""
+    ocr_file = work_dir / "_ocr_batch.md"
+    ocr_file.write_text(combined_md)
 
-    return run_with_images(
+    images_file = work_dir / "_images_batch.txt"
+    images_file.write_text("\n".join(str(p.resolve()) for p in image_paths))
+
+    prompt = f"""Read the task files in {work_dir}:
+- _ocr_batch.md: OCR output to review
+- _images_batch.txt: list of {len(image_paths)} image paths to read
+
+Compare the OCR text against the original images and fix errors:
+- ADD $...$ around all math variables in prose (OCR misses these) - e.g. "process z" -> "process $z$"
+- Preserve paragraph structure and line breaks
+- Keep content order (don't move footnotes)
+
+Output the CORRECTED markdown - not a summary of changes."""
+
+    return run(
         prompt,
-        image_paths,
         allowed_tools=["Read"],
         system_prompt=SYSTEM_PROMPT,
         model=model,

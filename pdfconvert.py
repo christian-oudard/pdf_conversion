@@ -2,10 +2,11 @@
 """Convert PDF to markdown, PDF, or EPUB.
 
 Usage:
-    pdfconvert [md|pdf|epub] <book_dir> [--pages 1-10] [--split]
+    pdfconvert [md|pdf|epub] <book_dir> [--pages 1-10] [--split] [--modal]
 
 Examples:
     pdfconvert documents/mybook              # default: markdown output
+    pdfconvert documents/mybook --modal      # use Modal cloud GPU for marker
     pdfconvert md documents/mybook           # explicit markdown
     pdfconvert pdf documents/mybook          # PDF output
     pdfconvert epub documents/mybook         # EPUB output
@@ -15,6 +16,7 @@ import argparse
 import io
 import re
 import sys
+import time
 from pathlib import Path
 
 import pymupdf
@@ -33,8 +35,32 @@ from output_format import build_pandoc_command
 import subprocess
 
 TARGET_DPI = 200
-BATCH_SIZE = 100
+BATCH_SIZE = 8  # ~25K tokens/page at 200 DPI, fits in 200K context
 MAX_EXTRACT_DPI = 300
+
+
+def convert_pdf_with_modal(pdf_path: Path) -> str:
+    """Convert PDF to markdown using marker on Modal (cloud GPU)."""
+    import modal
+
+    print(f"Uploading {pdf_path.stat().st_size / 1024 / 1024:.1f} MB to Modal...")
+    pdf_bytes = pdf_path.read_bytes()
+
+    # Call the deployed class method
+    try:
+        MarkerConverter = modal.Cls.from_name("marker-pdf", "MarkerConverter")
+    except modal.exception.NotFoundError:
+        print("Error: Modal app not deployed. Run first:", file=sys.stderr)
+        print("  modal deploy modal_marker.py", file=sys.stderr)
+        sys.exit(1)
+
+    print("Running marker OCR on Modal...", flush=True)
+    start = time.time()
+    converter = MarkerConverter()
+    result = converter.convert.remote(pdf_bytes)
+    elapsed = time.time() - start
+    print(f"Done in {elapsed:.1f}s")
+    return result
 
 
 def extract_image_bytes(doc: pymupdf.Document, page, img_info: dict) -> bytes | None:
@@ -180,9 +206,16 @@ def render_pages_to_temp(
         else:
             # Rendered page (no embedded image)
             png_bytes = render_page_to_bytes(page, TARGET_DPI)
-            output_path.write_bytes(png_bytes)
-            output_paths.append(output_path)
-            print(f"Page {pdf_page_num} (rendered) -> {output_path.name}")
+            if split:
+                left_bytes, right_bytes = split_image(png_bytes)
+                left_path.write_bytes(left_bytes)
+                right_path.write_bytes(right_bytes)
+                output_paths.extend([left_path, right_path])
+                print(f"Page {pdf_page_num} (rendered) -> {left_path.name}, {right_path.name}")
+            else:
+                output_path.write_bytes(png_bytes)
+                output_paths.append(output_path)
+                print(f"Page {pdf_page_num} (rendered) -> {output_path.name}")
 
     doc.close()
     return output_paths
@@ -193,6 +226,7 @@ def convert_batch_to_markdown(
     marker_pages: list[str],
     output_dir: Path,
     batch_num: int,
+    redo: bool = False,
 ) -> str:
     """Convert a batch of pages using Opus review.
 
@@ -201,6 +235,7 @@ def convert_batch_to_markdown(
         marker_pages: Marker markdown for each page.
         output_dir: Directory to cache batch output.
         batch_num: Batch number for naming.
+        redo: Force re-run even if cached.
 
     Returns:
         Combined markdown for the batch.
@@ -208,15 +243,19 @@ def convert_batch_to_markdown(
     batch_path = output_dir / f"batch_{batch_num:03d}.md"
 
     # Check cache
-    if batch_path.exists() and batch_path.stat().st_size > 0:
-        print(f"  batch {batch_num} ({len(png_paths)} pages) - cached")
+    if not redo and batch_path.exists() and batch_path.stat().st_size > 0:
+        print(f"  pages {batch_num * len(png_paths) + 1}-{batch_num * len(png_paths) + len(png_paths)} (cached)")
         return batch_path.read_text()
 
-    print(f"  batch {batch_num} ({len(png_paths)} pages)...", end=" ", flush=True)
+    start_page = batch_num * len(png_paths) + 1
+    end_page = start_page + len(png_paths) - 1
+    print(f"  pages {start_page}-{end_page}...", end=" ", flush=True)
 
     try:
+        start_time = time.time()
         result = review_batch(png_paths, marker_pages, model="opus")
-        print("done")
+        elapsed = time.time() - start_time
+        print(f"done ({elapsed:.1f}s)")
         batch_path.write_text(result)
         return result
     except ClaudeError as e:
@@ -312,14 +351,24 @@ def main():
         help="Split each page into left/right halves (for double-page spreads)",
     )
     parser.add_argument(
+        "--redo-marker",
+        action="store_true",
+        help="Re-run marker OCR even if cached",
+    )
+    parser.add_argument(
         "--redo-png",
         action="store_true",
         help="Re-render PNGs even if they exist",
     )
     parser.add_argument(
-        "--redo-md",
+        "--redo-claude",
         action="store_true",
-        help="Re-convert markdown even if it exists",
+        help="Re-run Claude review even if cached",
+    )
+    parser.add_argument(
+        "--modal",
+        action="store_true",
+        help="Run marker on Modal (cloud GPU) instead of locally",
     )
 
     args = parser.parse_args()
@@ -383,9 +432,12 @@ def main():
     # Step 1: Run marker on full PDF
     print("\n=== Running marker on PDF ===")
     marker_cache = work_dir / "marker_full.md"
-    if not args.redo_md and marker_cache.exists():
+    if not args.redo_marker and marker_cache.exists():
         print("Using cached marker output")
         marker_md = marker_cache.read_text()
+    elif args.modal:
+        marker_md = convert_pdf_with_modal(pdf_path)
+        marker_cache.write_text(marker_md)
     else:
         marker_md = convert_pdf_with_marker(pdf_path)
         marker_cache.write_text(marker_md)
@@ -416,8 +468,8 @@ def main():
         # Pad with empty strings
         marker_pages.extend([""] * (len(png_paths) - len(marker_pages)))
 
-    # Step 3: Convert in batches
-    print(f"\n=== Converting to markdown (batch size {BATCH_SIZE}) ===")
+    # Step 3: Review with Claude (correct OCR errors)
+    print(f"\n=== Reviewing with Claude ({BATCH_SIZE} pages/batch) ===")
     batches_dir = work_dir / "batches"
     batches_dir.mkdir(exist_ok=True)
 
@@ -427,7 +479,7 @@ def main():
         batch_markers = marker_pages[i:i + BATCH_SIZE]
         batch_num = i // BATCH_SIZE
 
-        result = convert_batch_to_markdown(batch_pngs, batch_markers, batches_dir, batch_num)
+        result = convert_batch_to_markdown(batch_pngs, batch_markers, batches_dir, batch_num, args.redo_claude)
         batch_outputs.append(result)
 
     # Step 4: Concatenate batches and remove page separators
