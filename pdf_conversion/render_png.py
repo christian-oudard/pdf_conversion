@@ -13,7 +13,7 @@ from pathlib import Path
 import pymupdf
 from PIL import Image
 
-from pdf_utils import find_original_pdf, parse_page_range, get_full_page_image
+from .pdf_utils import find_original_pdf, parse_page_range, get_full_page_image
 
 
 

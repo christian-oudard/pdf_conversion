@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from concatenate_md import concatenate_pages, validate_pages
+from pdf_conversion.concatenate_md import concatenate_pages, validate_pages
 
 
 class TestValidatePages(unittest.TestCase):

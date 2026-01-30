@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from output_format import find_markdown_file, build_pandoc_command
+from pdf_conversion.output_format import find_markdown_file, build_pandoc_command
 
 
 class TestFindMarkdownFile(unittest.TestCase):

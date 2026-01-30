@@ -13,7 +13,7 @@ import re
 import sys
 from pathlib import Path
 
-from claude_runner import run, run_with_image, run_with_images, ClaudeError
+from .claude_runner import run, run_with_image, run_with_images, ClaudeError
 
 
 def extract_output(text: str) -> str:

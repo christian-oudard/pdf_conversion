@@ -24,27 +24,27 @@ from pathlib import Path
 import pymupdf
 from PIL import Image
 
-from pdf_utils import find_original_pdf, parse_page_range, get_full_page_image
-from convert_md import (
+from pdf_conversion.pdf_utils import find_original_pdf, parse_page_range, get_full_page_image
+from pdf_conversion.convert_md import (
     convert_pdf_with_marker,
     split_marker_by_page,
     review_batch,
     remove_page_separators,
     PAGE_SEPARATOR,
 )
-from claude_runner import ClaudeError
-from output_format import build_pandoc_command
+from pdf_conversion.claude_runner import ClaudeError
+from pdf_conversion.output_format import build_pandoc_command
 import subprocess
 
 TARGET_DPI = 200
-BATCH_SIZE = 8
+BATCH_SIZE = 5
 MAX_EXTRACT_DPI = 300
 
 
 def convert_pdf_with_modal(pdf_path: Path) -> str:
     """Convert PDF to markdown using marker on Modal (cloud GPU)."""
     import modal
-    from modal_marker import (
+    from pdf_conversion.modal_marker import (
         GPU, GPU_PRICES,
         RECOGNITION_BATCH_SIZE, LAYOUT_BATCH_SIZE, DETECTION_BATCH_SIZE,
         OCR_ERROR_BATCH_SIZE, EQUATION_BATCH_SIZE, TABLE_REC_BATCH_SIZE,
@@ -157,12 +157,8 @@ def render_pages_to_temp(
     doc = pymupdf.open(pdf_path)
     total_pdf_pages = len(doc)
 
-    # Calculate filename width
-    if split:
-        max_book_page = total_pdf_pages * 2
-    else:
-        max_book_page = total_pdf_pages
-    width = max(3, len(str(max_book_page)))
+    if total_pdf_pages > 999:
+        raise ValueError(f"PDF has {total_pdf_pages} pages, max supported is 999")
 
     output_paths = []
 
@@ -182,44 +178,27 @@ def render_pages_to_temp(
             print(f"Warning: Page {pdf_page_num} out of range (1-{total_pdf_pages})", file=sys.stderr)
             continue
 
-        # Calculate book page number
+        # Determine output paths
         if split:
-            book_page = (pdf_page_num - 1) * 2 + 1
+            out_paths: list[Path] = [
+                temp_dir / f"page_{pdf_page_num:03d}_L.png",
+                temp_dir / f"page_{pdf_page_num:03d}_R.png",
+            ]
         else:
-            book_page = pdf_page_num
-
-        # Determine paths
-        if split:
-            left_path = temp_dir / f"page_{book_page:0{width}d}.png"
-            right_path = temp_dir / f"page_{book_page + 1:0{width}d}.png"
-        else:
-            output_path = temp_dir / f"page_{book_page:0{width}d}.png"
+            out_paths: list[Path] = [temp_dir / f"page_{pdf_page_num:03d}.png"]
 
         # Check if output already exists before loading page
-        if split:
-            if not redo and left_path.exists() and right_path.exists():
-                output_paths.extend([left_path, right_path])
-                status = "exists"
-                if current_status == status:
-                    range_end = pdf_page_num
-                else:
-                    if current_status:
-                        flush_range(current_status, range_start, range_end)
-                    current_status = status
-                    range_start = range_end = pdf_page_num
-                continue
-        else:
-            if not redo and output_path.exists():
-                output_paths.append(output_path)
-                status = "exists"
-                if current_status == status:
-                    range_end = pdf_page_num
-                else:
-                    if current_status:
-                        flush_range(current_status, range_start, range_end)
-                    current_status = status
-                    range_start = range_end = pdf_page_num
-                continue
+        if not redo and all(p.exists() for p in out_paths):
+            output_paths.extend(out_paths)
+            status = "exists"
+            if current_status == status:
+                range_end = pdf_page_num
+            else:
+                if current_status:
+                    flush_range(current_status, range_start, range_end)
+                current_status = status
+                range_start = range_end = pdf_page_num
+            continue
 
         # Load page and extract/render
         page = doc[pdf_page_num - 1]
@@ -240,27 +219,22 @@ def render_pages_to_temp(
 
             if split:
                 left_bytes, right_bytes = split_image(image_bytes)
-                left_bytes = to_grayscale(left_bytes)
-                right_bytes = to_grayscale(right_bytes)
-                left_path.write_bytes(left_bytes)
-                right_path.write_bytes(right_bytes)
-                output_paths.extend([left_path, right_path])
+                out_paths[0].write_bytes(to_grayscale(left_bytes))
+                out_paths[1].write_bytes(to_grayscale(right_bytes))
             else:
-                image_bytes = to_grayscale(image_bytes)
-                output_path.write_bytes(image_bytes)
-                output_paths.append(output_path)
+                out_paths[0].write_bytes(to_grayscale(image_bytes))
+            output_paths.extend(out_paths)
             status = "extracted"
         else:
             # Rendered page (no embedded image)
             png_bytes = render_page_to_bytes(page, TARGET_DPI)
             if split:
                 left_bytes, right_bytes = split_image(png_bytes)
-                left_path.write_bytes(left_bytes)
-                right_path.write_bytes(right_bytes)
-                output_paths.extend([left_path, right_path])
+                out_paths[0].write_bytes(left_bytes)
+                out_paths[1].write_bytes(right_bytes)
             else:
-                output_path.write_bytes(png_bytes)
-                output_paths.append(output_path)
+                out_paths[0].write_bytes(png_bytes)
+            output_paths.extend(out_paths)
             status = "rendered"
 
         # Update range tracking
@@ -430,8 +404,8 @@ def main():
     parser.add_argument(
         "-j", "--jobs",
         type=int,
-        default=1,
-        help="Number of parallel Claude API calls (default: 1)",
+        default=8,
+        help="Number of parallel Claude API calls (default: 8)",
     )
 
     args = parser.parse_args()
@@ -510,11 +484,28 @@ def main():
     print("\n=== Rendering pages ===")
     png_dir = work_dir / "png"
     png_dir.mkdir(exist_ok=True)
+
+    # Check for mismatch between existing PNGs and --split flag
+    existing_split = list(png_dir.glob("page_*_L.png"))
+    existing_nosplit = [p for p in png_dir.glob("page_*.png") if "_L" not in p.name and "_R" not in p.name]
+    if not args.split and existing_split:
+        print(f"Error: Found {len(existing_split)} split PNGs (page_*_L.png) but --split not specified.", file=sys.stderr)
+        print("Re-run with --split or delete the png/ directory to start fresh.", file=sys.stderr)
+        sys.exit(1)
+    if args.split and existing_nosplit:
+        print(f"Error: Found {len(existing_nosplit)} non-split PNGs but --split was specified.", file=sys.stderr)
+        print("Delete the png/ directory to start fresh with split mode.", file=sys.stderr)
+        sys.exit(1)
+
     png_paths = render_pages_to_temp(pdf_path, page_nums, png_dir, args.split, args.redo_png)
 
     # Split marker output by page
     marker_pages = split_marker_by_page(marker_md)
-    print(f"Split into {len(marker_pages)} pages")
+    print(f"Split marker into {len(marker_pages)} pages")
+
+    # Validate marker page count matches PDF
+    if len(marker_pages) != len(page_nums):
+        print(f"Warning: marker has {len(marker_pages)} pages but PDF has {len(page_nums)} pages", file=sys.stderr)
 
     # Map PNG paths to marker pages (handle split mode)
     if args.split:
@@ -533,8 +524,11 @@ def main():
         marker_pages.extend([""] * (len(png_paths) - len(marker_pages)))
 
     # Step 3: Review with Claude (correct OCR errors)
+    # In split mode, round up to even number (complete L/R pairs)
+    batch_size = BATCH_SIZE + (BATCH_SIZE % 2) if args.split else BATCH_SIZE
     parallel_info = f", {args.jobs} parallel" if args.jobs > 1 else ""
-    print(f"\n=== Reviewing with Claude ({BATCH_SIZE} pages/batch{parallel_info}) ===")
+    spread_info = f" = {batch_size // 2} spreads" if args.split else ""
+    print(f"\n=== Reviewing with Claude ({batch_size} pages/batch{spread_info}{parallel_info}) ===")
     pages_dir = work_dir / "pages"
     pages_dir.mkdir(exist_ok=True)
 
@@ -567,7 +561,7 @@ def main():
             batches.append((batch_idx, start, end, path))
             i = end  # Skip to end of cached range
         else:
-            end_idx = min(i + BATCH_SIZE, total_pages)
+            end_idx = min(i + batch_size, total_pages)
             start_page = i + 1
             end_page = end_idx
             batches.append((batch_idx, start_page, end_page, None))

@@ -6,13 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Run all tests
-uv run python -m unittest discover -v
+uv run python -m unittest discover -s tests -v
 
 # Run a single test file
-uv run python -m unittest test_concatenate_md -v
+uv run python -m unittest tests.test_concatenate_md -v
 
 # Run a single test
-uv run python -m unittest test_concatenate_md.TestValidatePages.test_missing_page_in_sequence -v
+uv run python -m unittest tests.test_concatenate_md.TestValidatePages.test_missing_page_in_sequence -v
 ```
 
 ## Environment
@@ -37,6 +37,9 @@ uv run python pdfconvert.py pdf documents/<book> --pages 1-10
 
 # Double-page spreads (splits each page in half)
 uv run python pdfconvert.py md documents/<book> --split
+
+# Use Modal cloud GPU for marker OCR
+uv run python pdfconvert.py documents/<book> --modal
 ```
 
 ## Output
@@ -51,11 +54,19 @@ documents/<book>/
 
 Intermediate PNGs and per-page markdown are created in a temp directory and cleaned up automatically.
 
-## Internal Modules
+## Project Structure
 
-- `render_png.py` — Render PDF pages to grayscale PNG (200 DPI)
-- `convert_md.py` — Convert PNG to markdown via Claude
-- `concatenate_md.py` — Merge markdown files
-- `output_format.py` — Convert markdown to PDF/EPUB via pandoc
-- `claude_runner.py` — Claude subprocess wrapper
-- `pdf_utils.py` — Shared PDF utilities
+```
+pdfconvert.py            # CLI entry point
+pdf_conversion/          # Library modules
+├── convert_md.py        # PNG to markdown via Claude
+├── concatenate_md.py    # Merge markdown files
+├── output_format.py     # Markdown to PDF/EPUB via pandoc
+├── claude_runner.py     # Claude subprocess wrapper
+├── pdf_utils.py         # Shared PDF utilities
+├── render_png.py        # Render PDF pages to PNG
+├── modal_marker.py      # Modal cloud GPU for marker OCR
+└── prompts/             # System prompts
+
+tests/                   # Unit tests
+```

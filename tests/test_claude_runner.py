@@ -4,7 +4,7 @@ import json
 import unittest
 from unittest.mock import patch, MagicMock
 
-from claude_runner import run, run_with_image, ClaudeResponse, ClaudeError
+from pdf_conversion.claude_runner import run, run_with_image, ClaudeResponse, ClaudeError
 
 
 class TestClaudeResponse(unittest.TestCase):
@@ -42,7 +42,7 @@ class TestClaudeResponse(unittest.TestCase):
 class TestRun(unittest.TestCase):
     """Test the run() function."""
 
-    @patch("claude_runner.subprocess.run")
+    @patch("pdf_conversion.claude_runner.subprocess.run")
     def test_basic_prompt(self, mock_run):
         """Basic prompt returns parsed response."""
         mock_run.return_value = MagicMock(
@@ -66,7 +66,7 @@ class TestRun(unittest.TestCase):
         self.assertIn("--output-format", cmd)
         self.assertIn("json", cmd)
 
-    @patch("claude_runner.subprocess.run")
+    @patch("pdf_conversion.claude_runner.subprocess.run")
     def test_allowed_tools(self, mock_run):
         """allowed_tools parameter adds --allowedTools flag."""
         mock_run.return_value = MagicMock(
@@ -81,7 +81,7 @@ class TestRun(unittest.TestCase):
         idx = cmd.index("--allowedTools")
         self.assertEqual(cmd[idx + 1], "Read,Bash,Edit")
 
-    @patch("claude_runner.subprocess.run")
+    @patch("pdf_conversion.claude_runner.subprocess.run")
     def test_model_parameter(self, mock_run):
         """model parameter adds --model flag."""
         mock_run.return_value = MagicMock(
@@ -96,7 +96,7 @@ class TestRun(unittest.TestCase):
         idx = cmd.index("--model")
         self.assertEqual(cmd[idx + 1], "haiku")
 
-    @patch("claude_runner.subprocess.run")
+    @patch("pdf_conversion.claude_runner.subprocess.run")
     def test_system_prompt(self, mock_run):
         """system_prompt parameter adds --system-prompt flag."""
         mock_run.return_value = MagicMock(
@@ -109,7 +109,7 @@ class TestRun(unittest.TestCase):
         cmd = mock_run.call_args[0][0]
         self.assertIn("--system-prompt", cmd)
 
-    @patch("claude_runner.subprocess.run")
+    @patch("pdf_conversion.claude_runner.subprocess.run")
     def test_nonzero_exit_raises(self, mock_run):
         """Non-zero exit code raises ClaudeError."""
         mock_run.return_value = MagicMock(
@@ -124,7 +124,7 @@ class TestRun(unittest.TestCase):
         self.assertEqual(ctx.exception.returncode, 1)
         self.assertIn("something went wrong", ctx.exception.stderr)
 
-    @patch("claude_runner.subprocess.run")
+    @patch("pdf_conversion.claude_runner.subprocess.run")
     def test_invalid_json_raises(self, mock_run):
         """Invalid JSON output raises ClaudeError."""
         mock_run.return_value = MagicMock(
@@ -138,7 +138,7 @@ class TestRun(unittest.TestCase):
 
         self.assertIn("exited with status", str(ctx.exception))
 
-    @patch("claude_runner.subprocess.run")
+    @patch("pdf_conversion.claude_runner.subprocess.run")
     def test_timeout_raises(self, mock_run):
         """Timeout raises ClaudeError."""
         import subprocess
@@ -153,7 +153,7 @@ class TestRun(unittest.TestCase):
 class TestRunWithImage(unittest.TestCase):
     """Test the run_with_image() function."""
 
-    @patch("claude_runner.subprocess.run")
+    @patch("pdf_conversion.claude_runner.subprocess.run")
     def test_image_path_in_prompt(self, mock_run):
         """Image path is included in the prompt."""
         mock_run.return_value = MagicMock(
@@ -168,7 +168,7 @@ class TestRunWithImage(unittest.TestCase):
         self.assertIn("/path/to/image.png", prompt)
         self.assertIn("Convert to markdown", prompt)
 
-    @patch("claude_runner.subprocess.run")
+    @patch("pdf_conversion.claude_runner.subprocess.run")
     def test_read_tool_allowed_by_default(self, mock_run):
         """Read tool is allowed by default for image processing."""
         mock_run.return_value = MagicMock(
