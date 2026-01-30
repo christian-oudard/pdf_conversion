@@ -15,52 +15,9 @@ from pathlib import Path
 
 from claude_runner import run, run_with_image, run_with_images, ClaudeError
 
-SYSTEM_PROMPT = """\
-You are a document conversion assistant. Review OCR output and correct errors.
-
-Omit print artifacts:
-- Page numbers at top/bottom of page
-- Running headers/footers (book title, chapter title repeated on every page)
-- Chapter numbers repeated in headers
-
-Markdown format:
-- # for headers
-- **text** for bold (no spaces inside delimiters)
-- *text* for italic (no spaces inside delimiters)
-- $...$ for inline math
-- $$...$$ for display math (must be on its own line, not inline with text)
-
-CRITICAL - Inline math (OCR often misses these):
-- ADD $...$ around ALL mathematical variables, even single letters in prose
-- Variables like x, y, z, t, s, n, k, f, g, T, etc. in math context need $...$
-- Correct: "the process $z$ is killed" / "for all $T > t$" / "at time $s$"
-- Wrong: "the process z is killed" / "for all T > t" / "at time s"
-- Also wrap expressions: "$t \\leq s$" not "t ≤ s", "$k = 1, 2, \\ldots$" not "k = 1, 2, ..."
-
-LaTeX symbol conventions:
-| Symbol | Wrong | Correct |
-|--------|-------|---------|
-| ‖f‖ | \\|\\|f\\|\\| or \|\|f\|\| | \\|f\\| |
-| ε | \\epsilon | \\varepsilon |
-| ℛ | R | \\mathscr{R} |
-| γ̄ | \\gamma | \\bar{\\gamma} |
-| → | -> | \\to or \\rightarrow |
-| ≤ | <= | \\leq or \\le |
-| ∈ | in | \\in |
-| ∞ | infinity | \\infty |
-
-Preserve structure:
-- Keep paragraph breaks as in original
-- Keep address blocks and multi-line formatting
-- Do not reorder content (footnotes stay where they appear)
-- Use \\qquad for equation number spacing: (82) \\qquad f(x) = ...
-
-Ensure formulas are transcribed correctly with valid mathematical logic. Take care with variable names, superscript, and subscript.
-
-For blank pages, output only: <BLANK>
-
-No code fences, no greetings, no explanations. Output ONLY the corrected markdown.
-"""
+# Load system prompt from file
+_PROMPT_FILE = Path(__file__).parent / "prompts" / "review_ocr.txt"
+SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 
 # Lazy-loaded marker converter
 _marker_converter = None
@@ -171,20 +128,24 @@ def review_batch(
     Returns:
         Combined markdown for all pages in the batch.
     """
+    import os
+
     # Write OCR output and image list to files to avoid command line length limits
     combined_md = "\n\n".join(marker_mds)
     if work_dir is None:
         work_dir = image_paths[0].parent if image_paths else Path.cwd()
 
-    ocr_file = work_dir / "_ocr_batch.md"
+    # Use unique filenames for parallel safety (thread id + process id)
+    batch_id = f"{os.getpid()}_{id(image_paths)}"
+    ocr_file = work_dir / f"_ocr_batch_{batch_id}.md"
     ocr_file.write_text(combined_md)
 
-    images_file = work_dir / "_images_batch.txt"
+    images_file = work_dir / f"_images_batch_{batch_id}.txt"
     images_file.write_text("\n".join(str(p.resolve()) for p in image_paths))
 
     prompt = f"""Read the task files in {work_dir}:
-- _ocr_batch.md: OCR output to review
-- _images_batch.txt: list of {len(image_paths)} image paths to read
+- {ocr_file.name}: OCR output to review
+- {images_file.name}: list of {len(image_paths)} image paths to read
 
 Compare the OCR text against the original images and fix errors:
 - ADD $...$ around all math variables in prose (OCR misses these) - e.g. "process z" -> "process $z$"
@@ -193,12 +154,17 @@ Compare the OCR text against the original images and fix errors:
 
 Output the CORRECTED markdown - not a summary of changes."""
 
-    return run(
-        prompt,
-        allowed_tools=["Read"],
-        system_prompt=SYSTEM_PROMPT,
-        model=model,
-    ).result
+    try:
+        return run(
+            prompt,
+            allowed_tools=["Read"],
+            system_prompt=SYSTEM_PROMPT,
+            model=model,
+        ).result
+    finally:
+        # Clean up temp files
+        ocr_file.unlink(missing_ok=True)
+        images_file.unlink(missing_ok=True)
 
 
 def _review_text(image_path: Path, marker_md: str, model: str) -> str:

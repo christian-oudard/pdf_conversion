@@ -2,11 +2,12 @@
 """Convert PDF to markdown, PDF, or EPUB.
 
 Usage:
-    pdfconvert [md|pdf|epub] <book_dir> [--pages 1-10] [--split] [--modal]
+    pdfconvert [md|pdf|epub] <book_dir> [--pages 1-10] [--split] [--modal] [-j N]
 
 Examples:
     pdfconvert documents/mybook              # default: markdown output
     pdfconvert documents/mybook --modal      # use Modal cloud GPU for marker
+    pdfconvert documents/mybook -j 4         # 4 parallel Claude API calls
     pdfconvert md documents/mybook           # explicit markdown
     pdfconvert pdf documents/mybook          # PDF output
     pdfconvert epub documents/mybook         # EPUB output
@@ -17,6 +18,7 @@ import io
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pymupdf
@@ -35,7 +37,7 @@ from output_format import build_pandoc_command
 import subprocess
 
 TARGET_DPI = 200
-BATCH_SIZE = 10
+BATCH_SIZE = 8
 MAX_EXTRACT_DPI = 300
 
 
@@ -292,21 +294,19 @@ def convert_batch_to_markdown(
 
     # Check cache
     if not redo and batch_path.exists() and batch_path.stat().st_size > 0:
-        print(f"  pages {start_page}-{end_page} (cached)")
+        # Don't print here - caller handles cache reporting
         return batch_path.read_text()
-
-    print(f"  pages {start_page}-{end_page}...", end=" ", flush=True)
 
     try:
         start_time = time.time()
         result = review_batch(png_paths, marker_pages, model="opus")
         elapsed = time.time() - start_time
-        print(f"done ({elapsed:.1f}s)")
+        print(f"  pages {start_page}-{end_page} ({elapsed:.1f}s)")
         batch_path.write_text(result)
         return result
     except ClaudeError as e:
         if "content filtering" in str(e).lower():
-            print("blocked, using marker output")
+            print(f"  pages {start_page}-{end_page} (blocked, using marker)")
             # Fallback to marker output for this batch
             result = "\n\n".join(marker_pages)
             batch_path.write_text(result)
@@ -416,6 +416,12 @@ def main():
         action="store_true",
         help="Run marker on Modal (cloud GPU) instead of locally",
     )
+    parser.add_argument(
+        "-j", "--jobs",
+        type=int,
+        default=1,
+        help="Number of parallel Claude API calls (default: 1)",
+    )
 
     args = parser.parse_args()
 
@@ -516,7 +522,8 @@ def main():
         marker_pages.extend([""] * (len(png_paths) - len(marker_pages)))
 
     # Step 3: Review with Claude (correct OCR errors)
-    print(f"\n=== Reviewing with Claude ({BATCH_SIZE} pages/batch) ===")
+    parallel_info = f", {args.jobs} parallel" if args.jobs > 1 else ""
+    print(f"\n=== Reviewing with Claude ({BATCH_SIZE} pages/batch{parallel_info}) ===")
     pages_dir = work_dir / "pages"
     pages_dir.mkdir(exist_ok=True)
 
@@ -528,41 +535,76 @@ def main():
         if match and f.stat().st_size > 0:
             cached_ranges.append((int(match.group(1)), int(match.group(2)), f))
 
-    # Build set of covered pages
-    covered_pages = set()
-    for start, end, _ in cached_ranges:
-        covered_pages.update(range(start, end + 1))
-
-    # Process all pages, using cache where available
-    batch_outputs = []
+    # Build list of batches: (batch_idx, start_page, end_page, cached_path_or_None)
+    batches = []
     total_pages = len(png_paths)
     i = 0
+    batch_idx = 0
     while i < total_pages:
         page_num = i + 1  # 1-indexed
 
         # Check if this page is in a cached range
         cached_hit = None
-        for start, end, path in cached_ranges:
-            if start == page_num:
-                cached_hit = (start, end, path)
-                break
+        if not args.redo_claude:
+            for start, end, path in cached_ranges:
+                if start == page_num:
+                    cached_hit = (start, end, path)
+                    break
 
-        if cached_hit and not args.redo_claude:
+        if cached_hit:
             start, end, path = cached_hit
-            print(f"  pages {start}-{end} (cached)")
-            batch_outputs.append(path.read_text())
+            batches.append((batch_idx, start, end, path))
             i = end  # Skip to end of cached range
         else:
-            # Process new batch
             end_idx = min(i + BATCH_SIZE, total_pages)
-            batch_pngs = png_paths[i:end_idx]
-            batch_markers = marker_pages[i:end_idx]
             start_page = i + 1
             end_page = end_idx
-
-            result = convert_batch_to_markdown(batch_pngs, batch_markers, pages_dir, start_page, end_page, args.redo_claude)
-            batch_outputs.append(result)
+            batches.append((batch_idx, start_page, end_page, None))
             i = end_idx
+        batch_idx += 1
+
+    # Separate cached vs uncached batches
+    cached_batches = [(idx, s, e, p) for idx, s, e, p in batches if p is not None]
+    uncached_batches = [(idx, s, e) for idx, s, e, p in batches if p is None]
+
+    # Report cached batches
+    for _, start, end, _ in cached_batches:
+        print(f"  pages {start}-{end} (cached)")
+
+    # Process uncached batches (parallel or sequential)
+    batch_results = {}  # batch_idx -> result
+
+    # Load cached results
+    for idx, _, _, path in cached_batches:
+        batch_results[idx] = path.read_text()
+
+    if uncached_batches:
+        def process_batch(batch_info):
+            idx, start_page, end_page = batch_info
+            batch_pngs = png_paths[start_page - 1:end_page]
+            batch_markers = marker_pages[start_page - 1:end_page]
+            result = convert_batch_to_markdown(
+                batch_pngs, batch_markers, pages_dir, start_page, end_page, args.redo_claude
+            )
+            return idx, result
+
+        if args.jobs > 1:
+            # Parallel execution - show what we're starting
+            page_ranges = [f"{s}-{e}" for _, s, e in uncached_batches]
+            print(f"  starting {len(uncached_batches)} batches: {', '.join(page_ranges)}")
+            with ThreadPoolExecutor(max_workers=args.jobs) as executor:
+                futures = {executor.submit(process_batch, b): b for b in uncached_batches}
+                for future in as_completed(futures):
+                    idx, result = future.result()
+                    batch_results[idx] = result
+        else:
+            # Sequential execution
+            for batch_info in uncached_batches:
+                idx, result = process_batch(batch_info)
+                batch_results[idx] = result
+
+    # Assemble outputs in order
+    batch_outputs = [batch_results[idx] for idx in sorted(batch_results.keys())]
 
     # Step 4: Concatenate batches and remove page separators
     print("\n=== Concatenating output ===")
