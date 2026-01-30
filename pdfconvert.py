@@ -64,10 +64,21 @@ def convert_pdf_with_modal(pdf_path: Path) -> str:
     print(f"Running marker OCR on Modal ({GPU}, {batch_info})...", flush=True)
     start = time.time()
     converter = MarkerConverter()
-    result = converter.convert.remote(pdf_bytes)
+
+    # Stream progress from Modal
+    result = None
+    for line in converter.convert_streaming.remote_gen(pdf_bytes):
+        if line.startswith("RESULT:"):
+            result = line[7:]
+        else:
+            print(line, flush=True)
+
     elapsed = time.time() - start
     cost = (elapsed / 3600) * GPU_PRICES.get(GPU, 0)
     print(f"Done in {elapsed:.1f}s (~${cost:.2f})")
+
+    if result is None:
+        raise RuntimeError("No result returned from Modal")
     return result
 
 

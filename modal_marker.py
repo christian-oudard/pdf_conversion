@@ -25,13 +25,14 @@ GPU_PRICES = {
 # Configuration (importable by pdfconvert.py)
 GPU = "A10G"
 
-# Batch sizes - surya recommended defaults (from README)
-RECOGNITION_BATCH_SIZE = 512   # 40MB/item, ~20GB VRAM
-LAYOUT_BATCH_SIZE = 32         # 220MB/item, ~7GB VRAM
-DETECTION_BATCH_SIZE = 36      # 440MB/item, ~16GB VRAM
-OCR_ERROR_BATCH_SIZE = 32      # Similar to layout
-EQUATION_BATCH_SIZE = 512      # Same as recognition
-TABLE_REC_BATCH_SIZE = 64      # 150MB/item, ~10GB VRAM
+# Batch sizes - conservative for large docs on A10G (24GB VRAM)
+# Reduced from surya defaults to leave headroom for model weights + large docs
+RECOGNITION_BATCH_SIZE = 128   # 40MB/item, ~5GB VRAM (was 512)
+LAYOUT_BATCH_SIZE = 16         # 220MB/item, ~3.5GB VRAM (was 32)
+DETECTION_BATCH_SIZE = 18      # 440MB/item, ~8GB VRAM (was 36)
+OCR_ERROR_BATCH_SIZE = 16      # Similar to layout (was 32)
+EQUATION_BATCH_SIZE = 128      # Same as recognition (was 512)
+TABLE_REC_BATCH_SIZE = 32      # 150MB/item, ~5GB VRAM (was 64)
 
 app = modal.App("marker-pdf")
 
@@ -97,7 +98,17 @@ class MarkerConverter:
 
     @modal.method()
     def convert(self, pdf_bytes: bytes) -> str:
-        """Convert PDF bytes to paginated markdown."""
+        """Convert PDF bytes to paginated markdown (non-streaming)."""
+        for item in self.convert_streaming(pdf_bytes):
+            if item.startswith("RESULT:"):
+                return item[7:]
+        raise RuntimeError("No result returned from convert_streaming")
+
+    @modal.method()
+    def convert_streaming(self, pdf_bytes: bytes):
+        """Convert PDF bytes to paginated markdown, yielding progress lines."""
+        import os
+        import sys
         import tempfile
         import threading
         import time
@@ -115,6 +126,20 @@ class MarkerConverter:
                 peak_vram[0] = max(peak_vram[0], allocated)
                 time.sleep(1)
 
+        # Capture stderr (where tqdm writes) via a pipe
+        progress_lines = []
+        old_stderr = sys.stderr
+        read_fd, write_fd = os.pipe()
+        sys.stderr = os.fdopen(write_fd, 'w', buffering=1)
+
+        def read_progress():
+            with os.fdopen(read_fd, 'r') as pipe:
+                for line in pipe:
+                    progress_lines.append(line.rstrip())
+
+        reader_thread = threading.Thread(target=read_progress, daemon=True)
+        reader_thread.start()
+
         monitor_thread = threading.Thread(target=monitor_gpu, daemon=True)
         monitor_thread.start()
 
@@ -123,10 +148,46 @@ class MarkerConverter:
             pdf_path = Path(f.name)
 
         try:
-            rendered = self.converter(str(pdf_path))
+            # Yield progress lines while conversion runs
+            result = [None]
+            error = [None]
+
+            def do_convert():
+                try:
+                    result[0] = self.converter(str(pdf_path))
+                except Exception as e:
+                    error[0] = e
+
+            convert_thread = threading.Thread(target=do_convert)
+            convert_thread.start()
+
+            last_idx = 0
+            while convert_thread.is_alive():
+                time.sleep(0.5)
+                # Yield any new progress lines
+                while last_idx < len(progress_lines):
+                    yield progress_lines[last_idx]
+                    last_idx += 1
+
+            convert_thread.join()
+
+            # Restore stderr and close pipe
+            sys.stderr.close()
+            sys.stderr = old_stderr
+            reader_thread.join(timeout=1)
+
+            # Yield remaining progress lines
+            while last_idx < len(progress_lines):
+                yield progress_lines[last_idx]
+                last_idx += 1
+
             stop_monitor.set()
-            print(f"Peak VRAM: {peak_vram[0]:.1f} GB")
-            return rendered.markdown
+
+            if error[0]:
+                raise error[0]
+
+            yield f"Peak VRAM: {peak_vram[0]:.1f} GB"
+            yield f"RESULT:{result[0].markdown}"
         finally:
             pdf_path.unlink()
 
