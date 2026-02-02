@@ -1,9 +1,27 @@
 """Shared PDF utilities."""
 
-import math
-from pathlib import Path
+from __future__ import annotations
 
-import pymupdf
+import math
+import os
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pymupdf
+
+
+def get_output_dir() -> Path:
+    """Get the output directory for converted documents.
+
+    Uses PDFCONVERT_OUTPUT_DIR environment variable if set,
+    otherwise defaults to ./documents relative to the package root.
+    """
+    env_dir = os.environ.get("PDFCONVERT_OUTPUT_DIR")
+    if env_dir:
+        return Path(env_dir).expanduser()
+    # Default: documents/ relative to the package (one level up from this file)
+    return Path(__file__).parent.parent / "documents"
 
 
 def find_original_pdf(doc_folder: Path) -> Path:

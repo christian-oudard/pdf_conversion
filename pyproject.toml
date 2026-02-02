@@ -3,7 +3,10 @@ name = "pdf-conversion"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
-    "marker-pdf[full]>=1.10.1",
+    "modal>=0.73",
     "pillow>=10.4.0,<11.0.0",
     "pymupdf>=1.26.7",
 ]
+
+[project.scripts]
+pdfconvert = "pdf_conversion.cli:main"

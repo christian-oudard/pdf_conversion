@@ -19,7 +19,11 @@ uv run python -m unittest tests.test_concatenate_md.TestValidatePages.test_missi
 
 **Always use `uv run` to execute Python scripts** in this project.
 
-**Dependencies:** pymupdf, pillow (Python), pandoc + tectonic (system, for PDF output)
+**Dependencies:** pymupdf, pillow, modal (Python), pandoc + tectonic (system, for PDF output)
+
+**Modal setup:** OCR runs on Modal cloud GPU. Deploy with `modal deploy pdf_conversion/modal_marker.py`
+
+**Output directory:** Set `PDFCONVERT_OUTPUT_DIR` to customize where converted documents are stored (default: `./documents`)
 
 ## Usage
 
@@ -37,9 +41,6 @@ uv run python pdfconvert.py pdf documents/<book> --pages 1-10
 
 # Double-page spreads (splits each page in half)
 uv run python pdfconvert.py md documents/<book> --split
-
-# Use Modal cloud GPU for marker OCR
-uv run python pdfconvert.py documents/<book> --modal
 ```
 
 ## Output
@@ -59,7 +60,7 @@ Intermediate PNGs and per-page markdown are created in a temp directory and clea
 ```
 pdfconvert.py            # CLI entry point
 pdf_conversion/          # Library modules
-├── convert_md.py        # PNG to markdown via Claude
+├── convert_md.py        # Claude review of marker OCR output
 ├── concatenate_md.py    # Merge markdown files
 ├── output_format.py     # Markdown to PDF/EPUB via pandoc
 ├── claude_runner.py     # Claude subprocess wrapper

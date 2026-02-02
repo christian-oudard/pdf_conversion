@@ -2,11 +2,10 @@
 """Convert PDF to markdown, PDF, or EPUB.
 
 Usage:
-    pdfconvert [md|pdf|epub] <book_dir> [--pages 1-10] [--split] [--modal] [-j N]
+    pdfconvert [md|pdf|epub] <book_dir> [--pages 1-10] [--split] [-j N]
 
 Examples:
     pdfconvert documents/mybook              # default: markdown output
-    pdfconvert documents/mybook --modal      # use Modal cloud GPU for marker
     pdfconvert documents/mybook -j 4         # 4 parallel Claude API calls
     pdfconvert md documents/mybook           # explicit markdown
     pdfconvert pdf documents/mybook          # PDF output
@@ -24,16 +23,14 @@ from pathlib import Path
 import pymupdf
 from PIL import Image
 
-from pdf_conversion.pdf_utils import find_original_pdf, parse_page_range, get_full_page_image
-from pdf_conversion.convert_md import (
-    convert_pdf_with_marker,
+from .pdf_utils import find_original_pdf, parse_page_range, get_full_page_image, get_output_dir
+from .convert_md import (
     split_marker_by_page,
     review_batch,
     remove_page_separators,
-    PAGE_SEPARATOR,
 )
-from pdf_conversion.claude_runner import ClaudeError
-from pdf_conversion.output_format import build_pandoc_command
+from .claude_runner import ClaudeError
+from .output_format import build_pandoc_command
 import subprocess
 
 TARGET_DPI = 200
@@ -399,11 +396,6 @@ def main():
         help="Re-run Claude review even if cached",
     )
     parser.add_argument(
-        "--modal",
-        action="store_true",
-        help="Run marker on Modal (cloud GPU) instead of locally",
-    )
-    parser.add_argument(
         "-j", "--jobs",
         type=int,
         default=8,
@@ -426,9 +418,8 @@ def main():
         print(f"Error: Not found: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Working directory is documents/ in this project
-    script_dir = Path(__file__).parent
-    documents_dir = script_dir / "documents"
+    # Working directory (configurable via PDFCONVERT_OUTPUT_DIR)
+    documents_dir = get_output_dir()
     documents_dir.mkdir(exist_ok=True)
 
     # Accept either a PDF file or a directory containing one
@@ -469,17 +460,14 @@ def main():
     output_suffix = {'md': '.md', 'pdf': '_output.pdf', 'epub': '_output.epub'}[output_format]
     output_path = work_dir / (pdf_path.stem + output_suffix)
 
-    # Step 1: Run marker on full PDF
-    print("\n=== Running marker on PDF ===")
+    # Step 1: Run marker on full PDF via Modal
+    print("\n=== Running marker on PDF (Modal) ===")
     marker_cache = work_dir / "marker_full.md"
     if not args.redo_marker and marker_cache.exists():
         print("Using cached marker output")
         marker_md = marker_cache.read_text()
-    elif args.modal:
-        marker_md = convert_pdf_with_modal(pdf_path)
-        marker_cache.write_text(marker_md)
     else:
-        marker_md = convert_pdf_with_marker(pdf_path)
+        marker_md = convert_pdf_with_modal(pdf_path)
         marker_cache.write_text(marker_md)
 
     # Step 2: Render pages to PNG
