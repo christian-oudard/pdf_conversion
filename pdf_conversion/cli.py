@@ -20,6 +20,52 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 
+# Track whether last output was a progress bar (for clean transitions)
+_last_was_progress = False
+
+
+def print_progress_line(line: str, file=None):
+    """Print a line, handling progress bars to reuse the same line.
+
+    Progress bars (tqdm-style) are printed with carriage return and no newline,
+    allowing subsequent updates to overwrite. Regular messages print normally.
+    """
+    global _last_was_progress
+    if file is None:
+        file = sys.stdout
+
+    # Detect tqdm-style progress bars: contain percentage and bar character
+    is_progress = '%|' in line
+
+    if is_progress:
+        file.write(f"\r{line}")
+        file.flush()
+        _last_was_progress = True
+    else:
+        if _last_was_progress:
+            file.write("\n")  # End the progress line first
+        file.write(f"{line}\n")
+        file.flush()
+        _last_was_progress = False
+
+
+def finish_progress(file=None):
+    """Add newline if last output was a progress bar."""
+    global _last_was_progress
+    if file is None:
+        file = sys.stdout
+
+    if _last_was_progress:
+        file.write("\n")
+        file.flush()
+        _last_was_progress = False
+
+
+def _reset_progress_state():
+    """Reset progress state (for testing)."""
+    global _last_was_progress
+    _last_was_progress = False
+
 import pymupdf
 from PIL import Image
 
@@ -68,7 +114,8 @@ def convert_pdf_with_modal(pdf_path: Path) -> str:
         if line.startswith("RESULT:"):
             result = line[7:]
         else:
-            print(line, flush=True)
+            print_progress_line(line)
+    finish_progress()
 
     elapsed = time.time() - start
     cost = (elapsed / 3600) * GPU_PRICES.get(GPU, 0)
