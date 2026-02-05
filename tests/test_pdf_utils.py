@@ -11,16 +11,16 @@ from pdf_conversion.pdf_utils import get_output_dir
 
 
 class TestGetOutputDir(unittest.TestCase):
-    def test_default_documents_dir(self):
-        """Without env var, should return ./documents relative to script."""
+    def test_missing_env_var_raises_error(self):
+        """Without env var, should raise an error."""
         with patch.dict(os.environ, {}, clear=True):
-            # Remove PDFCONVERT_OUTPUT_DIR if present
             os.environ.pop("PDFCONVERT_OUTPUT_DIR", None)
-            result = get_output_dir()
-            self.assertEqual(result.name, "documents")
+            with self.assertRaises(SystemExit) as ctx:
+                get_output_dir()
+            self.assertEqual(ctx.exception.code, 1)
 
-    def test_env_var_overrides_default(self):
-        """PDFCONVERT_OUTPUT_DIR should override the default."""
+    def test_env_var_sets_output_dir(self):
+        """PDFCONVERT_OUTPUT_DIR sets the output directory."""
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.dict(os.environ, {"PDFCONVERT_OUTPUT_DIR": tmpdir}):
                 result = get_output_dir()

@@ -23,7 +23,7 @@ uv run python -m unittest tests.test_concatenate_md.TestValidatePages.test_missi
 
 **Modal setup:** OCR runs on Modal cloud GPU. Deploy with `modal deploy pdf_conversion/modal_marker.py`
 
-**Output directory:** Set `PDFCONVERT_OUTPUT_DIR` to customize where converted documents are stored (default: `./documents`)
+**Output directory:** Set `PDFCONVERT_OUTPUT_DIR` to specify where converted documents are stored (required)
 
 ## Usage
 

@@ -465,7 +465,7 @@ def main():
         print(f"Error: Not found: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Working directory (configurable via PDFCONVERT_OUTPUT_DIR)
+    # Working directory (set via PDFCONVERT_OUTPUT_DIR)
     documents_dir = get_output_dir()
     documents_dir.mkdir(exist_ok=True)
 

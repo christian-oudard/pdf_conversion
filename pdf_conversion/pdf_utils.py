@@ -14,14 +14,15 @@ if TYPE_CHECKING:
 def get_output_dir() -> Path:
     """Get the output directory for converted documents.
 
-    Uses PDFCONVERT_OUTPUT_DIR environment variable if set,
-    otherwise defaults to ./documents relative to the package root.
+    Requires PDFCONVERT_OUTPUT_DIR environment variable to be set.
     """
+    import sys
+
     env_dir = os.environ.get("PDFCONVERT_OUTPUT_DIR")
-    if env_dir:
-        return Path(env_dir).expanduser()
-    # Default: documents/ relative to the package (one level up from this file)
-    return Path(__file__).parent.parent / "documents"
+    if not env_dir:
+        print("Error: PDFCONVERT_OUTPUT_DIR environment variable not set", file=sys.stderr)
+        sys.exit(1)
+    return Path(env_dir).expanduser()
 
 
 def find_original_pdf(doc_folder: Path) -> Path:

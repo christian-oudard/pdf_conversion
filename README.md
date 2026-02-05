@@ -39,9 +39,9 @@ Claude reviews and corrects the OCR output. This requires the Claude Code CLI an
    claude login
    ```
 
-### 3. Output Directory (Optional)
+### 3. Output Directory
 
-By default, converted documents are stored in `./documents`. To change this, set the `PDFCONVERT_OUTPUT_DIR` environment variable in your shell config:
+Set the `PDFCONVERT_OUTPUT_DIR` environment variable to specify where converted documents are stored:
 
 ```bash
 # ~/.bashrc or ~/.zshrc
